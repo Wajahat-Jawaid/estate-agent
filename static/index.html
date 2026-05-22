@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zameen AI — Intelligent Property Search</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --green: #1a5c3a;
+    --green-light: #2a7a4f;
+    --green-pale: #e8f5ee;
+    --green-mid: #c2dece;
+    --gold: #c9993a;
+    --gold-light: #f0d98a;
+    --bg: #f7f5f0;
+    --bg-card: #ffffff;
+    --text: #1a1a1a;
+    --text-mid: #4a4a4a;
+    --text-soft: #8a8a8a;
+    --border: #e2ddd6;
+    --shadow: 0 2px 20px rgba(0,0,0,0.06);
+    --shadow-hover: 0 8px 40px rgba(0,0,0,0.12);
+    --radius: 16px;
+    --radius-sm: 10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 28px;
+    height: 54px;
+    background: var(--green);
+    flex-shrink: 0;
+  }
+
+  .logo { font-family: 'Playfair Display', serif; font-size: 20px; color: #fff; letter-spacing: -0.3px; }
+  .logo span { color: var(--gold-light); }
+
+  .ai-badge {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--green); background: var(--gold-light); padding: 4px 12px; border-radius: 100px;
+  }
+
+  .topbar-right { display: flex; align-items: center; gap: 8px; font-size: 12px; color: rgba(255,255,255,0.6); }
+
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #4ade80; animation: pulse 2s infinite; }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* FILTER BAR */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .filter-bar-label {
+    font-size: 10px; font-weight: 500; color: var(--text-soft);
+    text-transform: uppercase; letter-spacing: 0.07em; white-space: nowrap; margin-right: 4px;
+  }
+
+  .filter-select, .filter-input {
+    font-family: 'DM Sans', sans-serif; font-size: 12px; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 7px 10px; outline: none; transition: border-color 0.2s; height: 34px; cursor: pointer;
+  }
+
+  .filter-input { width: 150px; cursor: text; }
+  .filter-input::placeholder { color: var(--text-soft); }
+  .filter-select:focus, .filter-input:focus { border-color: var(--green); }
+
+  .filter-select.ai-set, .filter-input.ai-set {
+    border-color: var(--green-mid); background: var(--green-pale); color: var(--green); font-weight: 500;
+  }
+
+  .filter-bar-divider { width: 1px; height: 24px; background: var(--border); flex-shrink: 0; }
+
+  .filter-search-btn {
+    font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500;
+    color: #fff; background: var(--green); border: none; border-radius: var(--radius-sm);
+    padding: 7px 16px; cursor: pointer; height: 34px; transition: background 0.2s; white-space: nowrap;
+  }
+
+  .filter-search-btn:hover { background: var(--green-light); }
+
+  .filter-reset-btn {
+    font-family: 'DM Sans', sans-serif; font-size: 12px; color: var(--text-soft);
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 7px 12px; cursor: pointer; height: 34px; transition: all 0.2s; white-space: nowrap;
+  }
+
+  .filter-reset-btn:hover { border-color: var(--green); color: var(--green); }
+
+  .ai-populated-note {
+    font-size: 10px; color: var(--green); background: var(--green-pale);
+    border: 1px solid var(--green-mid); border-radius: 100px; padding: 3px 10px;
+    display: none; align-items: center; gap: 4px; white-space: nowrap;
+  }
+
+  .ai-populated-note.visible { display: flex; }
+
+  /* MAIN */
+  .main {
+    display: grid; grid-template-columns: 1fr 1fr;
+    flex: 1; overflow: hidden; border-top: 1px solid var(--border);
+  }
+
+  .panel { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+  .panel:last-child { border-right: none; }
+
+  .panel-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--bg-card); flex-shrink: 0;
+  }
+
+  .panel-head-icon {
+    width: 26px; height: 26px; border-radius: 8px;
+    background: var(--green-pale); display: flex; align-items: center; justify-content: center; font-size: 12px;
+  }
+
+  .panel-title { font-size: 11px; font-weight: 500; color: var(--text-mid); text-transform: uppercase; letter-spacing: 0.07em; flex: 1; }
+
+  .panel-badge { font-size: 10px; padding: 2px 8px; border-radius: 100px; background: var(--green-pale); color: var(--green); font-weight: 500; }
+
+  .reset-chat-btn {
+    font-size: 10px; color: var(--text-soft); background: transparent;
+    border: 1px solid var(--border); border-radius: 100px; padding: 2px 10px; cursor: pointer; transition: all 0.15s;
+  }
+
+  .reset-chat-btn:hover { border-color: var(--green); color: var(--green); }
+
+  /* CHAT */
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth;
+  }
+
+  .chat-messages::-webkit-scrollbar { width: 4px; }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .msg { display: flex; flex-direction: column; max-width: 88%; }
+  .msg.user { align-self: flex-end; }
+  .msg.bot { align-self: flex-start; }
+
+  .msg-label { font-size: 10px; color: var(--text-soft); margin-bottom: 4px; font-weight: 500; letter-spacing: 0.04em; }
+  .msg.user .msg-label { text-align: right; }
+
+  .bubble { padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.6; }
+  .msg.user .bubble { background: var(--green); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.bot .bubble { background: var(--bg-card); color: var(--text); border: 1px solid var(--border); border-bottom-left-radius: 4px; box-shadow: var(--shadow); }
+
+  .typing-bubble {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 14px; border-bottom-left-radius: 4px;
+    padding: 14px 18px; display: flex; gap: 5px; align-items: center; width: fit-content;
+  }
+
+  .typing-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green-mid); animation: typingBounce 1.2s infinite; }
+  .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes typingBounce {
+    0%, 60%, 100% { transform: translateY(0); background: var(--green-mid); }
+    30% { transform: translateY(-5px); background: var(--green); }
+  }
+
+  .chat-input-area {
+    padding: 12px 14px; border-top: 1px solid var(--border);
+    background: var(--bg-card); display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+  }
+
+  .chat-input-wrap {
+    flex: 1; border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+    padding: 8px 12px; background: var(--bg); transition: border-color 0.2s;
+  }
+
+  .chat-input-wrap:focus-within { border-color: var(--green); }
+
+  .chat-input {
+    width: 100%; border: none; background: transparent;
+    font-family: 'DM Sans', sans-serif; font-size: 13px; color: var(--text);
+    resize: none; outline: none; max-height: 80px; min-height: 20px;
+  }
+
+  .chat-input::placeholder { color: var(--text-soft); }
+
+  .send-btn {
+    width: 36px; height: 36px; border-radius: var(--radius-sm);
+    background: var(--green); border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    transition: background 0.2s, transform 0.1s;
+  }
+
+  .send-btn:hover { background: var(--green-light); }
+  .send-btn:active { transform: scale(0.95); }
+  .send-btn:disabled { background: var(--border); cursor: not-allowed; }
+  .send-btn svg { width: 15px; height: 15px; fill: #fff; }
+
+  /* SUGGESTIONS */
+  .suggestions { padding: 0 14px 10px; display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
+
+  .suggestion-chip {
+    font-size: 11px; padding: 4px 10px; border-radius: 100px;
+    border: 1px solid var(--border); background: var(--bg-card); color: var(--text-mid);
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  }
+
+  .suggestion-chip:hover { border-color: var(--green); color: var(--green); background: var(--green-pale); }
+
+  /* RESULTS */
+  .results-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .results-body::-webkit-scrollbar { width: 4px; }
+  .results-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .prop-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 14px;
+    transition: all 0.2s; cursor: pointer;
+    animation: cardIn 0.3s ease forwards; opacity: 0;
+  }
+
+  @keyframes cardIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+  .prop-card:hover { box-shadow: var(--shadow-hover); border-color: var(--green-mid); transform: translateY(-1px); }
+  .prop-card.best { border-color: var(--gold); }
+
+  .prop-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 3px; }
+  .prop-title { font-family: 'Playfair Display', serif; font-size: 13px; color: var(--text); line-height: 1.3; }
+  .prop-price { font-size: 12px; font-weight: 500; color: var(--green); white-space: nowrap; }
+  .prop-location { font-size: 11px; color: var(--text-soft); margin-bottom: 7px; }
+  .prop-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 100px; background: var(--bg); color: var(--text-soft); border: 1px solid var(--border); }
+  .tag.match { background: var(--green-pale); color: var(--green); border-color: var(--green-mid); }
+  .tag.gold { background: #fef9ec; color: var(--gold); border-color: var(--gold-light); }
+
+  .match-row { display: flex; align-items: center; gap: 8px; }
+  .match-label { font-size: 10px; color: var(--text-soft); }
+  .match-track { flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .match-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width 0.6s ease; }
+  .prop-card.best .match-fill { background: var(--gold); }
+  .match-pct { font-size: 10px; font-weight: 500; color: var(--text-soft); min-width: 28px; text-align: right; }
+
+  .prop-agent {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-soft); display: flex; justify-content: space-between;
+  }
+
+  .prop-agent strong { color: var(--text-mid); }
+
+  .prop-details {
+    display: none; margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--border); flex-direction: column; gap: 8px; animation: fadeIn 0.2s ease;
+  }
+
+  .prop-details.open { display: flex; }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+  .detail-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+  .detail-key { color: var(--text-soft); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
+  .detail-val { color: var(--text-mid); }
+  .detail-features { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .expand-hint { font-size: 10px; color: var(--text-soft); text-align: right; margin-top: 6px; transition: color 0.2s; }
+  .prop-card:hover .expand-hint { color: var(--green); }
+
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px;
+    color: var(--text-soft); text-align: center; padding: 20px;
+  }
+
+  .empty-icon { font-size: 32px; opacity: 0.3; }
+  .empty-text { font-size: 12px; line-height: 1.6; }
+
+  .show-more-btn {
+    width: 100%; padding: 10px; border: 1.5px dashed var(--green-mid);
+    border-radius: var(--radius); background: transparent; color: var(--green);
+    font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500;
+    cursor: pointer; transition: all 0.2s;
+  }
+
+  .show-more-btn:hover { background: var(--green-pale); border-style: solid; }
+
+  .skeleton-card {
+    height: 120px; border-radius: var(--radius);
+    background: linear-gradient(90deg, var(--border) 25%, var(--bg) 50%, var(--border) 75%);
+    background-size: 200% 100%; animation: shimmer 1.2s infinite;
+  }
+
+  .skeleton-card:nth-child(2) { animation-delay: 0.15s; }
+  .skeleton-card:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">zameen<span>.com</span></div>
+  <div class="ai-badge">AI Search — Demo</div>
+  <div class="topbar-right">
+    <div class="status-dot"></div>
+    AI Agent Online
+  </div>
+</div>
+
+<!-- HORIZONTAL FILTER BAR -->
+<div class="filter-bar">
+  <span class="filter-bar-label">Filters</span>
+
+  <input type="text" class="filter-input" id="fb-location" placeholder="Location (e.g. DHA, Clifton)" />
+
+  <select class="filter-select" id="fb-type">
+    <option value="">Any Type</option>
+    <option value="house">House</option>
+    <option value="apartment">Apartment / Flat</option>
+    <option value="upper portion">Upper Portion</option>
+    <option value="lower portion">Lower Portion</option>
+    <option value="penthouse">Penthouse</option>
+    <option value="farmhouse">Farmhouse</option>
+  </select>
+
+  <select class="filter-select" id="fb-bedrooms">
+    <option value="">Any Beds</option>
+    <option value="1">1 Bed</option>
+    <option value="2">2 Beds</option>
+    <option value="3">3 Beds</option>
+    <option value="4">4 Beds</option>
+    <option value="5">5+ Beds</option>
+  </select>
+
+  <select class="filter-select" id="fb-price">
+    <option value="">Any Price</option>
+    <option value="25 lac">Up to 25 lac</option>
+    <option value="50 lac">Up to 50 lac</option>
+    <option value="1 crore">Up to 1 crore</option>
+    <option value="1 crore 50 lac">Up to 1.5 crore</option>
+    <option value="2 crore">Up to 2 crore</option>
+    <option value="2 crore 50 lac">Up to 2.5 crore</option>
+    <option value="3 crore">Up to 3 crore</option>
+    <option value="4 crore">Up to 4 crore</option>
+    <option value="5 crore">Up to 5 crore</option>
+    <option value="7 crore">Up to 7 crore</option>
+    <option value="10 crore">Up to 10 crore</option>
+  </select>
+
+  <select class="filter-select" id="fb-feature">
+    <option value="">Any Feature</option>
+    <option value="parking">Parking</option>
+    <option value="near school">Near School</option>
+    <option value="near hospital">Near Hospital</option>
+    <option value="near mosque">Near Mosque</option>
+    <option value="near market">Near Market</option>
+    <option value="near park">Near Park</option>
+    <option value="sea view">Sea View</option>
+    <option value="swimming pool">Swimming Pool</option>
+    <option value="gym">Gym</option>
+    <option value="gated community">Gated Community</option>
+    <option value="servant quarters">Servant Quarters</option>
+    <option value="generator backup">Generator Backup</option>
+    <option value="corner plot">Corner Plot</option>
+    <option value="24hr security">24hr Security</option>
+    <option value="renovated">Renovated</option>
+    <option value="separate entrance">Separate Entrance</option>
+    <option value="rooftop terrace">Rooftop Terrace</option>
+    <option value="huge lawn">Huge Lawn</option>
+  </select>
+
+  <div class="filter-bar-divider"></div>
+
+  <button class="filter-search-btn" onclick="searchFromFilters()">🔍 Search</button>
+  <button class="filter-reset-btn" onclick="resetFilters()">Reset</button>
+
+  <div class="ai-populated-note" id="aiNote">✦ AI populated</div>
+</div>
+
+<div class="main">
+
+  <!-- CHAT PANEL -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="panel-head-icon">💬</div>
+      <div class="panel-title">Chat</div>
+      <button class="reset-chat-btn" onclick="resetChat()">New conversation</button>
+    </div>
+
+    <div class="chat-messages" id="chatMessages">
+      <div class="msg bot">
+        <div class="msg-label">AI Agent</div>
+        <div class="bubble">
+          Assalam o Alaikum! I'm your Zameen AI assistant. Tell me what you're looking for — location, budget, bedrooms, or anything else on your mind. I'll find the best matches for you.
+        </div>
+      </div>
+    </div>
+
+    <div class="suggestions" id="suggestions">
+      <div class="suggestion-chip" onclick="sendSuggestion(this)">3 bed house in DHA under 2.5 crore</div>
+      <div class="suggestion-chip" onclick="sendSuggestion(this)">Apartments in Clifton with sea view</div>
+      <div class="suggestion-chip" onclick="sendSuggestion(this)">Farmhouse near Karachi</div>
+      <div class="suggestion-chip" onclick="sendSuggestion(this)">Lower portion under 40 lac</div>
+    </div>
+
+    <div class="chat-input-area">
+      <div class="chat-input-wrap">
+        <textarea
+          class="chat-input"
+          id="chatInput"
+          placeholder="Describe what you're looking for..."
+          rows="1"
+          onkeydown="handleKey(event)"
+          oninput="autoResize(this)"
+        ></textarea>
+      </div>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+        <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- RESULTS PANEL -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="panel-head-icon">🏠</div>
+      <div class="panel-title">Results</div>
+      <div class="panel-badge" id="resultsBadge">0 matches</div>
+    </div>
+
+    <div class="results-body" id="resultsBody">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">🏙️</div>
+        <div class="empty-text">Your matched properties<br>will appear here</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const API_URL = 'http://localhost:8000';
+  let isLoading = false;
+  let allListings = [];
+
+  // ── FILTER BAR ──────────────────────────────────────────────
+
+  function setFilterBarFromAI(filters) {
+    let anySet = false;
+
+    if (filters.location) {
+      const el = document.getElementById('fb-location');
+      el.value = filters.location;
+      el.classList.add('ai-set');
+      anySet = true;
+    }
+
+    if (filters.type) {
+      const sel = document.getElementById('fb-type');
+      for (let opt of sel.options) {
+        if (opt.value.toLowerCase() === filters.type.toLowerCase()) {
+          sel.value = opt.value; break;
+        }
+      }
+      sel.classList.add('ai-set');
+      anySet = true;
+    }
+
+    if (filters.bedrooms) {
+      const sel = document.getElementById('fb-bedrooms');
+      sel.value = String(filters.bedrooms);
+      sel.classList.add('ai-set');
+      anySet = true;
+    }
+
+    if (filters.max_price) {
+      const sel = document.getElementById('fb-price');
+      for (let opt of sel.options) {
+        if (opt.value === filters.max_price) { sel.value = opt.value; break; }
+      }
+      sel.classList.add('ai-set');
+      anySet = true;
+    }
+
+    if (filters.features && filters.features.length > 0) {
+      const sel = document.getElementById('fb-feature');
+      const first = filters.features[0].toLowerCase();
+      for (let opt of sel.options) {
+        if (opt.value.toLowerCase() === first) { sel.value = opt.value; break; }
+      }
+      sel.classList.add('ai-set');
+      anySet = true;
+    }
+
+    if (anySet) document.getElementById('aiNote').classList.add('visible');
+  }
+
+  function resetFilters() {
+    document.getElementById('fb-location').value = '';
+    document.getElementById('fb-location').classList.remove('ai-set');
+    ['fb-type', 'fb-bedrooms', 'fb-price', 'fb-feature'].forEach(id => {
+      const el = document.getElementById(id);
+      el.value = '';
+      el.classList.remove('ai-set');
+    });
+    document.getElementById('aiNote').classList.remove('visible');
+  }
+
+  function searchFromFilters() {
+    const location = document.getElementById('fb-location').value.trim();
+    const type = document.getElementById('fb-type').value;
+    const bedrooms = document.getElementById('fb-bedrooms').value;
+    const max_price = document.getElementById('fb-price').value;
+    const feature = document.getElementById('fb-feature').value;
+
+    const parts = [];
+    if (bedrooms) parts.push(`${bedrooms} bedroom`);
+    if (type) parts.push(type);
+    if (location) parts.push(`in ${location}`);
+    if (max_price) parts.push(`under ${max_price}`);
+    if (feature) parts.push(`with ${feature}`);
+
+    const query = parts.length > 0
+      ? `Show me ${parts.join(' ')}`
+      : 'Show me all available properties';
+
+    document.getElementById('chatInput').value = query;
+    sendMessage();
+  }
+
+  // ── CHAT ────────────────────────────────────────────────────
+
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 80) + 'px';
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  }
+
+  function sendSuggestion(el) {
+    document.getElementById('chatInput').value = el.textContent;
+    document.getElementById('suggestions').style.display = 'none';
+    sendMessage();
+  }
+
+  function appendMessage(role, text) {
+    const container = document.getElementById('chatMessages');
+    const msg = document.createElement('div');
+    msg.className = `msg ${role}`;
+    msg.innerHTML = `
+      <div class="msg-label">${role === 'user' ? 'You' : 'AI Agent'}</div>
+      <div class="bubble">${text.replace(/\n/g, '<br>')}</div>
+    `;
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function showTyping() {
+    const container = document.getElementById('chatMessages');
+    const t = document.createElement('div');
+    t.className = 'msg bot'; t.id = 'typingIndicator';
+    t.innerHTML = `
+      <div class="msg-label">AI Agent</div>
+      <div class="typing-bubble">
+        <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+      </div>`;
+    container.appendChild(t);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function removeTyping() {
+    const el = document.getElementById('typingIndicator');
+    if (el) el.remove();
+  }
+
+  function showSkeletons() {
+    const body = document.getElementById('resultsBody');
+    body.querySelectorAll('.prop-card, .show-more-btn').forEach(c => c.remove());
+    const empty = document.getElementById('emptyState');
+    if (empty) empty.style.display = 'none';
+    for (let i = 0; i < 3; i++) {
+      const s = document.createElement('div');
+      s.className = 'skeleton-card'; s.id = `skeleton-${i}`;
+      body.appendChild(s);
+    }
+  }
+
+  function hideSkeletons() {
+    document.querySelectorAll('[id^="skeleton-"]').forEach(el => el.remove());
+    const empty = document.getElementById('emptyState');
+    if (empty) {
+      empty.style.display = 'none';
+      empty.innerHTML = `<div class="empty-icon">🏙️</div><div class="empty-text">Your matched properties<br>will appear here</div>`;
+    }
+  }
+
+  function resetChat() {
+    document.getElementById('chatMessages').innerHTML = `
+      <div class="msg bot">
+        <div class="msg-label">AI Agent</div>
+        <div class="bubble">Assalam o Alaikum! I'm your Zameen AI assistant. Tell me what you're looking for — location, budget, bedrooms, or anything else on your mind.</div>
+      </div>`;
+    document.getElementById('suggestions').style.display = 'flex';
+    updateResults([]);
+    resetFilters();
+    fetch(`${API_URL}/reset`, { method: 'POST' }).catch(() => {});
+  }
+
+  // ── RESULTS ─────────────────────────────────────────────────
+
+  function updateResults(listings) {
+    const body = document.getElementById('resultsBody');
+    const badge = document.getElementById('resultsBadge');
+    const empty = document.getElementById('emptyState');
+
+    allListings = listings || [];
+    body.querySelectorAll('.prop-card, .show-more-btn').forEach(c => c.remove());
+
+    if (!listings || listings.length === 0) {
+      badge.textContent = '0 matches';
+      if (empty) {
+        empty.style.display = 'flex';
+        empty.innerHTML = `
+          <div class="empty-icon">🔍</div>
+          <div class="empty-text">No properties matched<br>your search criteria.<br><br>
+          <span style="color:var(--green);font-weight:500;">Try broadening your search</span></div>`;
+      }
+      return;
+    }
+
+    badge.textContent = `${listings.length} match${listings.length > 1 ? 'es' : ''}`;
+    if (empty) empty.style.display = 'none';
+
+    renderCards(listings.slice(0, 5), body);
+
+    if (listings.length > 5) {
+      const btn = document.createElement('button');
+      btn.className = 'show-more-btn';
+      btn.textContent = `Show ${listings.length - 5} more results`;
+      btn.onclick = () => { btn.remove(); renderCards(listings.slice(5), body); };
+      body.appendChild(btn);
+    }
+  }
+
+  function renderCards(listings, container) {
+    listings.forEach((listing) => {
+      const m = listing.metadata;
+      const score = listing.score || 0;
+      const globalIndex = allListings.indexOf(listing);
+      const isBest = globalIndex === 0 && (allListings.length === 1 || allListings[0].score > allListings[1].score);
+
+      let features = [];
+      try {
+        features = typeof m.features === 'string'
+          ? JSON.parse(m.features.replace(/'/g, '"'))
+          : (m.features || []);
+      } catch(e) { features = []; }
+
+      const featureTags = features.length
+        ? features.map(f => `<span class="tag match">${f}</span>`).join('')
+        : '<span class="tag">No features listed</span>';
+
+      const card = document.createElement('div');
+      card.className = `prop-card${isBest ? ' best' : ''}`;
+
+      card.innerHTML = `
+        <div class="prop-top">
+          <div class="prop-title">${m.title}</div>
+          <div class="prop-price">${m.price}</div>
+        </div>
+        <div class="prop-location">📍 ${m.location}</div>
+        <div class="prop-tags">
+          <span class="tag">${m.type}</span>
+          <span class="tag">${m.bedrooms} bed</span>
+          ${isBest ? '<span class="tag gold">⭐ Best match</span>' : ''}
+        </div>
+        <div class="match-row">
+          <span class="match-label">Match</span>
+          <div class="match-track">
+            <div class="match-fill" style="width: ${Math.max(score, 20)}%"></div>
+          </div>
+          <span class="match-pct">${score}%</span>
+        </div>
+        <div class="prop-agent">
+          <span>Agent: <strong>${m.agent}</strong></span>
+          <span>${m.contact}</span>
+        </div>
+        <div class="prop-details" id="details-${m.id}">
+          <div class="detail-row">
+            <span class="detail-key">Bathrooms</span>
+            <span class="detail-val">${m.bathrooms || '—'}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-key">Area</span>
+            <span class="detail-val">${m.area_sqyd || '—'} sq yards</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-key">Features</span>
+          </div>
+          <div class="detail-features">${featureTags}</div>
+        </div>
+        <div class="expand-hint" id="hint-${m.id}">Tap to see details ▾</div>
+      `;
+
+      card.addEventListener('click', () => {
+        const details = document.getElementById(`details-${m.id}`);
+        const hint = document.getElementById(`hint-${m.id}`);
+        const isOpen = details.classList.contains('open');
+        details.classList.toggle('open');
+        hint.textContent = isOpen ? 'Tap to see details ▾' : 'Tap to collapse ▴';
+      });
+
+      container.appendChild(card);
+    });
+  }
+
+  // ── SEND ────────────────────────────────────────────────────
+
+  async function sendMessage() {
+    if (isLoading) return;
+    const input = document.getElementById('chatInput');
+    const message = input.value.trim();
+    if (!message) return;
+
+    isLoading = true;
+    document.getElementById('sendBtn').disabled = true;
+    document.getElementById('suggestions').style.display = 'none';
+    input.value = ''; input.style.height = 'auto';
+
+    appendMessage('user', message);
+    showTyping();
+    showSkeletons();
+
+    try {
+      const res = await fetch(`${API_URL}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message })
+      });
+
+      const data = await res.json();
+      removeTyping();
+      hideSkeletons();
+      appendMessage('bot', data.response);
+
+      if (data.filters && Object.keys(data.filters).length > 0) {
+        resetFilters();
+        setFilterBarFromAI(data.filters);
+      }
+
+      updateResults(data.listings || []);
+
+    } catch (err) {
+      removeTyping();
+      hideSkeletons();
+      appendMessage('bot', 'Sorry, I could not connect to the server. Please make sure the backend is running.');
+      console.error(err);
+    }
+
+    isLoading = false;
+    document.getElementById('sendBtn').disabled = false;
+    input.focus();
+  }
+</script>
+</body>
+</html>
