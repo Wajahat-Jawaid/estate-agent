@@ -19,14 +19,31 @@ vectorstore = Chroma(
 
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
+    # model="llama-3.1-8b-instant",
     api_key=os.getenv("GROQ_API_KEY"),
     temperature=0.7
 )
 
-memory = ConversationBufferMemory(return_messages=True)
+llm_fast = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    # model="llama-3.1-8b-instant",
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0.1  # low temp for structured decisions
+)
 
-# Full search history — never overwritten, only appended
-search_history = []
+# Per-user memory and search history
+user_memories = {}
+user_search_histories = {}
+
+def get_user_memory(user_id: str) -> ConversationBufferMemory:
+    if user_id not in user_memories:
+        user_memories[user_id] = ConversationBufferMemory(return_messages=True)
+    return user_memories[user_id]
+
+def get_user_search_history(user_id: str) -> list:
+    if user_id not in user_search_histories:
+        user_search_histories[user_id] = []
+    return user_search_histories[user_id]
 
 def price_to_lacs(price_str: str) -> int:
     price_str = price_str.lower().strip()
@@ -39,28 +56,39 @@ def price_to_lacs(price_str: str) -> int:
         lac = int(lac_match.group(1))
     return (crore * 100) + lac
 
+def lacs_to_price(n: int) -> str:
+    c, r = n // 100, n % 100
+    if c and r:
+        decimal = f"{c + r / 100:.2f}".rstrip('0').rstrip('.')
+        return f"{decimal} crore"
+    if c: return f"{c} crore"
+    return f"{n} lac"
+
 def extract_filters(query: str) -> dict:
-    prompt = f"""
-Extract property search filters from this query as JSON. Only include filters explicitly mentioned.
+    prompt = f"""Extract property search filters from this query as JSON. Only include filters explicitly mentioned.
 
 Query: "{query}"
 
 Return ONLY a valid JSON object with these possible keys (omit any not mentioned):
-- location (string)
-- type (string: house/apartment/upper portion/lower portion/penthouse/farmhouse)
+- locations (array of strings) — list EVERY location mentioned. If multiple locations mentioned (e.g. "DHA or Clifton"), list all. Omit if no location mentioned.
+- types (array of strings) — list EVERY property type mentioned from: house/apartment/upper portion/lower portion/penthouse/farmhouse. Omit if not mentioned.
 - bedrooms (integer)
+- min_bathrooms (integer)
 - max_price (string, in Pakistani format e.g. "2 crore 50 lac")
 - features (array of strings)
 
-Return only raw JSON. No explanation. No markdown. No backticks.
-"""
-    response = llm.invoke([HumanMessage(content=prompt)])
+Return only raw JSON. No explanation. No markdown. No backticks."""
+    response = llm_fast.invoke([HumanMessage(content=prompt)])
     try:
-        return json.loads(response.content.strip())
+        raw = response.content.strip()
+        # strip markdown fences if present
+        raw = re.sub(r'^```[a-z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        return json.loads(raw)
     except:
         return {}
 
-def classify_query(query: str) -> dict:
+def classify_query(query: str, search_history: list) -> dict:
     if not search_history:
         return {"type": "NEWSEARCH", "index": None}
 
@@ -68,45 +96,45 @@ def classify_query(query: str) -> dict:
     for i, entry in enumerate(search_history):
         history_summary += f"Search {i}: {entry['topic']}\n"
 
-    prompt = f"""
-You are helping a real estate chatbot classify a user query.
+    prompt = f"""Classify this real estate chatbot query.
 
-Previous searches in this session:
+Previous searches:
 {history_summary}
 
-Current user query: "{query}"
+Current query: "{query}"
 
-RULES — read carefully:
+CLASSIFICATION RULES:
 
-NEWSEARCH if the query:
-- Mentions a NEW location not in any previous search
-- Asks for a different property type not previously searched
-- Changes the budget significantly
-- Uses phrases like "what about X", "do you have in X", "show me X", "any in X"
-- Is asking to explore a new area or category
+SMALLTALK — greetings, general conversation, out of scope (weather, jokes etc)
 
-FOLLOWUP if the query:
-- Asks to compare, rank, or pick from already shown properties
-- Asks about details of already shown properties (area, agent, street, features)
-- Uses words like "which one", "the biggest", "the cheapest", "among these", "from those"
-- Asks about a specific property ID or title already shown
-- Refers to "those properties", "the ones you showed", "from the results"
+NEWSEARCH — mentions a new location, new property type, significantly different budget, or is exploring a new category
 
-CRITICAL: If the query mentions ANY new location, area, or neighbourhood — it is ALWAYS a NEWSEARCH regardless of phrasing.
+FOLLOWUP — asking about details of already shown properties, comparing shown properties, selecting by number ("1", "2", "3"), asking about agent/contact of shown properties
 
-If FOLLOWUP, which search index is being referred to?
+CHEAPER — wants cheaper/more affordable/lower price options than what was shown
 
-Return ONLY valid JSON:
-{{"type": "FOLLOWUP", "index": 0}}
-or
-{{"type": "NEWSEARCH", "index": null}}
+LARGER — wants bigger/larger/more rooms than what was shown
 
-No explanation. No markdown. No backticks.
-"""
-    response = llm.invoke([HumanMessage(content=prompt)])
+IMAGES — wants to see photos/pictures/images of a property already shown. May reference a property number (e.g. "images of property 2", "show me photos of the first one")
+
+Return ONLY valid JSON with no explanation:
+{{"type": "NEWSEARCH", "index": null, "property_num": null}}
+{{"type": "FOLLOWUP", "index": 0, "property_num": null}}
+{{"type": "CHEAPER", "index": 0, "property_num": null}}
+{{"type": "LARGER", "index": 0, "property_num": null}}
+{{"type": "SMALLTALK", "index": null, "property_num": null}}
+{{"type": "IMAGES", "index": 0, "property_num": 2}}
+
+Index = which previous search is being referenced. Default to last search index if unclear.
+property_num = 1-based property number the user referenced (null if not specified)."""
+
+    response = llm_fast.invoke([HumanMessage(content=prompt)])
     try:
-        result = json.loads(response.content.strip())
-        print(f">> Raw classification: {result}")
+        raw = response.content.strip()
+        raw = re.sub(r'^```[a-z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        result = json.loads(raw)
+        print(f">> Classification: {result}")
         return result
     except:
         return {"type": "NEWSEARCH", "index": None}
@@ -114,225 +142,490 @@ No explanation. No markdown. No backticks.
 def build_chroma_filter(filters: dict):
     conditions = []
 
-    if "bedrooms" in filters:
+    if filters.get("bedrooms") is not None:
         conditions.append({"bedrooms": {"$eq": filters["bedrooms"]}})
 
-    if "type" in filters:
-        conditions.append({"type": {"$eq": filters["type"]}})
+    if filters.get("min_bathrooms") is not None:
+        conditions.append({"bathrooms": {"$gte": filters["min_bathrooms"]}})
 
-    if "max_price" in filters:
-        max_lacs = price_to_lacs(filters["max_price"])
+    types = filters.get("types") or ([filters["type"]] if filters.get("type") else [])
+    if types:
+        valid_types = [t for t in types if isinstance(t, str)]
+        if len(valid_types) == 1:
+            conditions.append({"type": {"$eq": valid_types[0]}})
+        elif len(valid_types) > 1:
+            conditions.append({"type": {"$in": valid_types}})
+
+    if filters.get("max_price") is not None:
+        max_lacs = price_to_lacs(str(filters["max_price"]))
         if max_lacs > 0:
             conditions.append({"price_numeric": {"$lte": max_lacs}})
 
-    # Location intentionally excluded — handled by soft filter in search_properties
-
-    if len(conditions) == 0:
+    if not conditions:
         return None
-    elif len(conditions) == 1:
+    if len(conditions) == 1:
         return conditions[0]
-    else:
-        return {"$and": conditions}
+    return {"$and": conditions}
 
 def search_properties(query: str, filters: dict, k: int = 10) -> list:
     chroma_filter = build_chroma_filter(filters)
+    locations = filters.get("locations") or []
+    fetch_k = max(k * 4, 40)
 
-    # Fetch more than needed to account for location filtering
-    fetch_k = 20 if "location" in filters else k
+    if len(locations) > 1:
+        per_loc = []
+        for loc in locations:
+            loc_lower = loc.lower()
+            q = f"{query} {loc}"
+            try:
+                res = vectorstore.similarity_search_with_score(q, k=fetch_k, filter=chroma_filter) if chroma_filter else vectorstore.similarity_search_with_score(q, k=fetch_k)
+            except:
+                res = vectorstore.similarity_search_with_score(q, k=fetch_k)
+
+            loc_matches = sorted(
+                [(doc, score) for doc, score in res if loc_lower in doc.metadata.get("location", "").lower()],
+                key=lambda x: x[1]
+            )
+            per_loc.append(loc_matches)
+            print(f">> {loc}: {len(loc_matches)} candidates")
+
+        seen_ids = set()
+        merged = []
+        iters = [iter(b) for b in per_loc]
+        exhausted = [False] * len(iters)
+        while len(merged) < k and not all(exhausted):
+            for i, it in enumerate(iters):
+                if exhausted[i] or len(merged) >= k:
+                    continue
+                try:
+                    doc, score = next(it)
+                    doc_id = doc.metadata.get("id", doc.page_content[:80])
+                    if doc_id not in seen_ids:
+                        seen_ids.add(doc_id)
+                        merged.append((doc, score))
+                except StopIteration:
+                    exhausted[i] = True
+        return merged[:k]
 
     try:
-        if chroma_filter:
-            results = vectorstore.similarity_search_with_score(
-                query, k=fetch_k, filter=chroma_filter
-            )
-        else:
-            results = vectorstore.similarity_search_with_score(
-                query, k=fetch_k
-            )
+        results = vectorstore.similarity_search_with_score(query, k=fetch_k, filter=chroma_filter) if chroma_filter else vectorstore.similarity_search_with_score(query, k=fetch_k)
     except Exception as e:
         print(f"Filter failed, falling back: {e}")
         results = vectorstore.similarity_search_with_score(query, k=fetch_k)
 
-    # Apply soft location filter in Python if location was specified
-    if "location" in filters and filters["location"]:
-        location_keyword = filters["location"].lower()
-        filtered = [
-            (doc, score) for doc, score in results
-            if location_keyword in doc.metadata.get("location", "").lower()
-        ]
-        # Only apply filter if it actually found something
-        # If nothing matches, fall back to unfiltered results
+    if not results and chroma_filter:
+        results = vectorstore.similarity_search_with_score(query, k=fetch_k)
+
+    if locations:
+        loc_lower = locations[0].lower()
+        filtered = [(doc, score) for doc, score in results if loc_lower in doc.metadata.get("location", "").lower()]
         if filtered:
             results = filtered
 
-    # Return top k after filtering
     return results[:k]
 
-def get_response(user_query: str) -> dict:
-    global search_history
+def fetch_cheaper(locations: list, max_price_lacs: int, prev_filters: dict, k: int = 10) -> list:
+    min_price_lacs = max(int(max_price_lacs * 0.50), 30)
+    price_filter = {"$and": [
+        {"price_numeric": {"$lte": max_price_lacs}},
+        {"price_numeric": {"$gte": min_price_lacs}},
+    ]}
+    types = prev_filters.get("types", [])
+    if types:
+        type_cond = {"type": {"$eq": types[0]}} if len(types) == 1 else {"type": {"$in": types}}
+        price_filter = {"$and": [price_filter, type_cond]}
 
-    # ── Small talk check — skip ChromaDB entirely ──
-    small_talk_prompt = f"""Is this message small talk, a greeting, or general conversation unrelated to property search?
-Message: "{user_query}"
-Reply with only: SMALLTALK or PROPERTY"""
+    query = " ".join(locations) if locations else "property"
+    seen_ids = {}
+    for loc in (locations if locations else [""]):
+        q = f"{query} {loc}".strip()
+        try:
+            res = vectorstore.similarity_search_with_score(q, k=200, filter=price_filter)
+        except:
+            try:
+                simple = {"$and": [{"price_numeric": {"$lte": max_price_lacs}}, {"price_numeric": {"$gte": min_price_lacs}}]}
+                res = vectorstore.similarity_search_with_score(q, k=200, filter=simple)
+            except:
+                res = vectorstore.similarity_search_with_score(q, k=200)
 
-    st_check = llm.invoke([HumanMessage(content=small_talk_prompt)])
-    if st_check.content.strip().upper() == "SMALLTALK":
+        for doc, score in res:
+            if not loc or loc.lower() in doc.metadata.get("location", "").lower():
+                doc_id = doc.metadata.get("id", doc.page_content[:50])
+                if doc_id not in seen_ids:
+                    seen_ids[doc_id] = (doc, score)
+
+    sorted_results = sorted(seen_ids.values(), key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
+    return sorted_results[:k]
+
+def _results_to_listings(results: list) -> tuple:
+    context = ""
+    matched_listings = []
+    raw = list(results)
+    if not raw:
+        return matched_listings, context
+    best = raw[0][1]
+    worst = raw[-1][1]
+    span = worst - best
+    for doc, score in raw:
+        context += f"\n---\n{doc.page_content}\n"
+        norm = 95 if span == 0 else 95 - ((score - best) / span) * 23
+        matched_listings.append({"metadata": doc.metadata, "score": round(norm)})
+    return matched_listings, context
+
+def decide_actions(
+    user_query: str,
+    classification_type: str,
+    matched_listings: list,
+    filters: dict,
+    search_history: list,
+    channel: str,
+    history_text: str
+) -> dict:
+    """
+    Second LLM call — decides the follow-up message and contextual actions.
+    Returns: {"follow_up": str|null, "actions": [{"id": str, "label": str}]}
+    """
+    no_results = len(matched_listings) == 0
+    prices = [int(l["metadata"].get("price_numeric") or 0) for l in matched_listings if l["metadata"].get("price_numeric")]
+    min_price = min(prices) if prices else 0
+    max_price_shown = max(prices) if prices else 0
+    bedrooms_shown = list(set([l["metadata"].get("bedrooms") for l in matched_listings if l["metadata"].get("bedrooms")]))
+    has_price_filter = bool(filters.get("max_price"))
+    locations = filters.get("locations", [])
+    
+    max_actions = 2 if channel == "whatsapp" else 3
+
+    prompt = f"""You are deciding what follow-up options to offer after a real estate search.
+
+Context:
+- User query: "{user_query}"
+- Query type: {classification_type}
+- Properties found: {len(matched_listings)}
+- Price range shown: {lacs_to_price(min_price)} to {lacs_to_price(max_price_shown)} {"(no price filter applied)" if not has_price_filter else "(price filter was used)"}
+- Bedrooms shown: {bedrooms_shown}
+- Locations: {locations}
+- Channel: {channel}
+- Conversation: {history_text[-200:] if history_text else "none"}
+
+Available action IDs and when to use them:
+- "cheaper": user might want cheaper options. Use if results found AND there's room to go cheaper AND no very tight price filter already applied
+- "larger": user might want bigger properties. Use if results found AND properties aren't already very large (5+ beds)
+- "contact": user wants agent contacts. Use if results found
+- "new_search": user wants to search something different. Use if it makes sense contextually
+- "increase_budget": user has no results and might consider higher budget. Use only if no_results=true
+- "different_area": user has no results and might try different area. Use only if no_results=true
+
+Rules:
+- If SMALLTALK or greeting: return empty actions and null follow_up
+- If no results: offer increase_budget and/or different_area only
+- If results found: offer relevant actions only (max {max_actions})
+- The follow_up message should be warm, contextual, and natural — not generic
+- Never say "Anything else I can help with?" — be specific to context
+- Match the language style of the conversation (Urdu/English)
+
+Return ONLY valid JSON:
+{{
+  "follow_up": "contextual follow-up message or null",
+  "actions": [
+    {{"id": "action_id", "label": "emoji + short label"}}
+  ]
+}}
+
+No explanation. No markdown. No backticks."""
+
+    try:
+        response = llm_fast.invoke([HumanMessage(content=prompt)])
+        raw = response.content.strip()
+        raw = re.sub(r'^```[a-z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw)
+        result = json.loads(raw)
+        # Safety: cap actions at max
+        result["actions"] = result.get("actions", [])[:max_actions]
+        result["follow_up"] = result.get("follow_up")
+        print(f">> Actions decided: {result}")
+        return result
+    except Exception as e:
+        print(f">> Action decision failed: {e}")
+        # Safe fallback
+        if no_results:
+            return {"follow_up": "Want to try a different area or adjust your budget?", "actions": [{"id": "different_area", "label": "🗺️ Different area"}, {"id": "increase_budget", "label": "💰 Adjust budget"}]}
+        return {"follow_up": None, "actions": [{"id": "contact", "label": "📞 Agent contacts"}, {"id": "new_search", "label": "🔍 New search"}]}
+
+def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
+    memory = get_user_memory(user_id)
+    search_history = get_user_search_history(user_id)
+
+    # Conversation history
+    history = memory.chat_memory.messages
+    history_text = ""
+
+    # Quick small talk check before full classification
+    quick_check = llm_fast.invoke([HumanMessage(content=f"""Is this a greeting or small talk unrelated to property search?
+    Message: "{user_query}"
+    Reply with only: SMALLTALK or PROPERTY""")])
+    if quick_check.content.strip().upper() == "SMALLTALK":
         response = llm.invoke([
-            SystemMessage(content="You are a friendly real estate assistant. Respond warmly to greetings and small talk, then ask what property the user is looking for. Be brief. Respond in the same language as the user."),
+            SystemMessage(content="You are a friendly real estate assistant. Respond warmly to greetings, then ask what property they're looking for. Max 2 sentences. Match the user's language."),
             HumanMessage(content=user_query)
         ])
         ai_response = response.content
         memory.chat_memory.add_user_message(user_query)
         memory.chat_memory.add_ai_message(ai_response)
-        return {
-            "response": ai_response,
-            "listings": [],
-            "filters": {}
-        }
+        return {"response": ai_response, "listings": [], "filters": {}, "follow_up": None, "actions": [], "meta": {"no_results": False, "action": None}}
 
-    # Conversation history
-    history = memory.chat_memory.messages
-    history_text = ""
     for msg in history[-6:]:
         if isinstance(msg, HumanMessage):
             history_text += f"User: {msg.content}\n"
         elif isinstance(msg, AIMessage):
             history_text += f"Assistant: {msg.content}\n"
 
-    # Classify query
-    classification = classify_query(user_query)
-    print(f">> Classification: {classification}")
+    stripped = user_query.strip()
+    matched_listings = None
+    context = ""
+    filters = {}
+    action_label = None
+    classification_type = "NEWSEARCH"
 
-    if classification["type"] == "FOLLOWUP" and classification["index"] is not None:
-        # Retrieve the specific previous search being referred to
-        index = classification["index"]
-        if index < len(search_history):
-            matched_listings = search_history[index]["listings"]
-            context = search_history[index]["context"]
-            filters = {}
-            print(f">> Follow up on search {index}: '{search_history[index]['topic']}'")
+    # Handle numeric shortcuts (4=cheaper, 5=larger, 6=contact)
+    if stripped in ("4", "5", "6") and search_history:
+        last = search_history[-1]
+        prev_filters = last.get("filters", {})
+        prev_listings = last["listings"]
+        locations = prev_filters.get("locations", [])
+
+        if stripped == "4":
+            action_label = "cheaper"
+            classification_type = "CHEAPER"
+            shown = prev_listings[:5]
+            prices = [int(l["metadata"].get("price_numeric") or 0) for l in shown if l["metadata"].get("price_numeric")]
+            if prices:
+                max_price_lacs = int(min(prices)) - 1
+                filters = {k: v for k, v in prev_filters.items()}
+                filters["max_price"] = lacs_to_price(max_price_lacs)
+                results = fetch_cheaper(locations, max_price_lacs, prev_filters, k=10)
+                matched_listings, context = _results_to_listings(results)
+                search_history.append({"topic": f"cheaper · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
+                user_query = "show cheaper property options"
+            else:
+                matched_listings = []
+
+        elif stripped == "5":
+            action_label = "larger"
+            classification_type = "LARGER"
+            filters = {k: v for k, v in prev_filters.items()}
+            shown_beds = [l["metadata"].get("bedrooms", 0) for l in prev_listings[:5] if l["metadata"].get("bedrooms")]
+            base_beds = prev_filters.get("bedrooms") or (max(shown_beds) if shown_beds else 3)
+            new_beds = base_beds + 1
+            filters["bedrooms"] = new_beds
+            loc_str = " ".join(locations) if locations else "properties"
+            results = search_properties(f"{new_beds} bed {loc_str}", filters, k=10)
+            results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
+            matched_listings, context = _results_to_listings(results)
+            search_history.append({"topic": f"larger · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
+            user_query = f"show {new_beds} bedroom properties"
+
+        else:  # "6"
+            matched_listings = prev_listings
+            context = last["context"]
+            filters = prev_filters
+            user_query = "Share the full agent name, phone number and contact details for each property shown"
+            classification_type = "FOLLOWUP"
+
+    if matched_listings is None:
+        # Digit follow-up shortcut
+        if stripped.isdigit() and int(stripped) <= 9 and search_history:
+            classification = {"type": "FOLLOWUP", "index": len(search_history) - 1}
+            classification_type = "FOLLOWUP"
+            print(f">> Classification: digit shortcut → FOLLOWUP")
         else:
-            # Index out of range safety fallback
-            matched_listings = search_history[-1]["listings"]
-            context = search_history[-1]["context"]
+            classification = classify_query(user_query, search_history)
+            classification_type = classification["type"]
+
+        # SMALLTALK
+        if classification_type == "SMALLTALK":
+            response = llm.invoke([
+                SystemMessage(content="You are a friendly real estate assistant. Respond warmly and briefly to greetings or small talk, then naturally ask what property they are looking for. Max 2 sentences. Respond in the user's language (Urdu or English)."),
+                HumanMessage(content=user_query)
+            ])
+            ai_response = response.content
+            memory.chat_memory.add_user_message(user_query)
+            memory.chat_memory.add_ai_message(ai_response)
+            return {"response": ai_response, "listings": [], "filters": {}, "follow_up": None, "actions": [], "meta": {"no_results": False, "action": None}}
+
+        # LARGER
+        if classification_type == "LARGER" and search_history:
+            action_label = "larger"
+            idx = min(classification.get("index") or len(search_history) - 1, len(search_history) - 1)
+            last = search_history[idx]
+            prev_filters = last.get("filters", {})
+            prev_listings = last["listings"]
+            locations = prev_filters.get("locations", [])
+            shown_beds = [l["metadata"].get("bedrooms", 0) for l in prev_listings[:5] if l["metadata"].get("bedrooms")]
+            base_beds = prev_filters.get("bedrooms") or (max(shown_beds) if shown_beds else 3)
+            new_beds = base_beds + 1
+            filters = {k: v for k, v in prev_filters.items()}
+            filters["bedrooms"] = new_beds
+            loc_str = " ".join(locations) if locations else "properties"
+            results = search_properties(f"{new_beds} bed {loc_str}", filters, k=10)
+            results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
+            matched_listings, context = _results_to_listings(results)
+            search_history.append({"topic": f"larger · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
+            user_query = f"show {new_beds} bedroom properties"
+
+        # CHEAPER
+        elif classification_type == "CHEAPER" and search_history:
+            action_label = "cheaper"
+            idx = min(classification.get("index") or len(search_history) - 1, len(search_history) - 1)
+            last = search_history[idx]
+            prev_filters = last.get("filters", {})
+            prev_listings = last["listings"]
+            locations = prev_filters.get("locations", [])
+            shown = prev_listings[:5]
+            prices = [int(l["metadata"].get("price_numeric") or 0) for l in shown if l["metadata"].get("price_numeric")]
+            if prices:
+                max_price_lacs = int(min(prices)) - 1
+                filters = {k: v for k, v in prev_filters.items()}
+                filters["max_price"] = lacs_to_price(max_price_lacs)
+                results = fetch_cheaper(locations, max_price_lacs, prev_filters, k=10)
+                matched_listings, context = _results_to_listings(results)
+                search_history.append({"topic": f"cheaper · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
+                user_query = "show cheaper property options"
+            else:
+                matched_listings = []
+
+        # FOLLOWUP
+        elif classification_type == "FOLLOWUP" and classification.get("index") is not None:
+            idx = classification["index"]
+            if idx >= len(search_history):
+                idx = len(search_history) - 1
+            matched_listings = search_history[idx]["listings"]
+            context = search_history[idx]["context"]
             filters = {}
-    else:
-        # New search
-        filters = extract_filters(user_query)
-        results = search_properties(user_query, filters)
+            if stripped.isdigit():
+                selected = int(stripped) - 1
+                if 0 <= selected < len(matched_listings):
+                    matched_listings = [matched_listings[selected]]
+                    context = matched_listings[0]["metadata"].get("description", context)
 
-        context = ""
-        matched_listings = []
-        raw_scores = []
+        # IMAGES
+        elif classification_type == "IMAGES" and search_history:
+            action_label = "images"
+            idx = min((classification.get("index") or len(search_history) - 1), len(search_history) - 1)
+            # Fall back to most recent search that actually had results
+            while idx > 0 and not search_history[idx]["listings"]:
+                idx -= 1
+            prev_listings = search_history[idx]["listings"]
 
-        for doc, score in results:
-            context += f"\n---\n{doc.page_content}\n"
-            raw_scores.append((doc, score))
+            # Resolve which property the user wants
+            prop_num = classification.get("property_num")
+            if not prop_num:
+                num_match = re.search(r'\b([1-9])\b', user_query)
+                prop_num = int(num_match.group(1)) if num_match else 1
+            prop_idx = max(0, min(int(prop_num) - 1, len(prev_listings) - 1))
+            target = prev_listings[prop_idx] if prev_listings else None
 
-        if raw_scores:
-            best_distance = raw_scores[0][1]
-            worst_distance = raw_scores[-1][1]
-            score_range = worst_distance - best_distance
+            if target:
+                images_raw = target["metadata"].get("images", "[]")
+                images_list = json.loads(images_raw) if isinstance(images_raw, str) else images_raw
+                prop_title = target["metadata"].get("title", "Property").title()
+                ai_response = f"Here are all the photos for *{prop_title}* 📸"
+                memory.chat_memory.add_user_message(user_query)
+                memory.chat_memory.add_ai_message(ai_response)
+                return {
+                    "response": ai_response,
+                    "listings": [target],
+                    "filters": {},
+                    "follow_up": None,
+                    "actions": [],
+                    "meta": {
+                        "no_results": False,
+                        "action": "images",
+                        "images_to_send": images_list,
+                        "images_title": prop_title,
+                    }
+                }
+            else:
+                matched_listings = []
 
-            for doc, score in raw_scores:
-                if score_range == 0:
-                    normalized = 95
-                else:
-                    # Best gets 95, worst gets 72, others scale in between
-                    normalized = 95 - ((score - best_distance) / score_range) * 23
-                matched_listings.append({
-                    "metadata": doc.metadata,
-                    "score": round(normalized)
-                })
+        # NEWSEARCH
+        if matched_listings is None:
+            filters = extract_filters(user_query)
+            results = search_properties(user_query, filters)
+            results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
+            matched_listings, context = _results_to_listings(results)
 
-        # Build a readable topic label for this search
-        topic_parts = []
-        if "location" in filters:
-            topic_parts.append(filters["location"])
-        if "type" in filters:
-            topic_parts.append(filters["type"])
-        if "bedrooms" in filters:
-            topic_parts.append(f"{filters['bedrooms']} bed")
-        if "max_price" in filters:
-            topic_parts.append(f"under {filters['max_price']}")
-        topic = ", ".join(topic_parts) if topic_parts else user_query[:60]
-
-        search_history.append({
-            "topic": topic,
-            "listings": matched_listings,
-            "context": context
-        })
-        print(f">> New search saved as: '{topic}'")
-
-    system_prompt = """You are a helpful real estate assistant for a Karachi property search platform.
-Be conversational, concise and helpful.
-
-If the user is making small talk (greetings, asking how you are, general conversation) — respond warmly and briefly, then gently ask what property they are looking for. Do NOT show property listings for small talk.
-
-Only search and show properties when the user is clearly asking about real estate.
-Answer strictly from the provided property listings — do not make up information.
-If the user asks about streets, surroundings, or neighbourhood details not in the listing data,
-honestly say that specific detail isn't in the listing but suggest they ask the agent directly.
-Respond in the same language the user is using (Urdu or English)."""
+            topic_parts = []
+            if filters.get("locations"):
+                topic_parts.append(" / ".join(filters["locations"]))
+            if filters.get("types"):
+                topic_parts.append("/".join(filters["types"]))
+            if filters.get("bedrooms"):
+                topic_parts.append(f"{filters['bedrooms']} bed")
+            if filters.get("max_price"):
+                topic_parts.append(f"under {filters['max_price']}")
+            topic = ", ".join(topic_parts) if topic_parts else user_query[:60]
+            search_history.append({"topic": topic, "listings": matched_listings, "context": context, "filters": filters})
+            print(f">> New search saved as: '{topic}'")
 
     no_results = len(matched_listings) == 0
 
-    user_prompt = f"""
-    Conversation history:
-    {history_text}
+    # ── CALL 1: Generate conversational response ──
+    if channel == "whatsapp" and not no_results:
+        system_prompt = """You are a WhatsApp real estate assistant. Property cards will be sent right after your message — do NOT list or describe any properties.
+Write ONE warm, natural sentence introducing the results. Examples: "Great news, found some solid options! 👇" or "Here's what we have for you 🏠"
+Match the user's language (Urdu or English). One sentence only."""
+    elif no_results:
+        system_prompt = """You are a helpful real estate assistant. No properties were found.
+Rules:
+- ONE sentence saying nothing matched — friendly, not apologetic
+- ONE sentence suggesting a specific alternative (different area, higher budget, or different type)
+- Never say "I'm sorry", "I apologize", or anything formal
+- Speak like a helpful friend
+- Match the user's language (Urdu or English)"""
+    else:
+        system_prompt = """You are a helpful real estate assistant. Keep responses SHORT and NATURAL.
+Rules:
+- Maximum 2 sentences
+- Never say "I'm sorry", "I apologize", "database", or anything formal  
+- Speak like a knowledgeable friend, not customer service
+- Reference the best 1-2 options naturally with price if relevant
+- Never invent details not in the listings
+- Match the user's language (Urdu or English)"""
 
-    User query: {user_query}
+    user_prompt = f"""Conversation history:
+{history_text}
 
-    {"No matching properties found in the database." if no_results else f"Available properties:{context}"}
+User query: {user_query}
 
-    {"Politely tell the user no properties matched their criteria. Suggest they broaden their search — different area, higher budget, or different property type. Be helpful and specific with suggestions based on their query." if no_results else "Answer the user's question based strictly on the available properties above. If comparing or selecting, reason through the properties and give a clear answer. Mention agent name and contact where relevant."}
-    """
+{"No matching properties found." if no_results else f"Available properties:{context}"}
 
-    response = llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt)
-    ])
+{"Tell the user nothing matched and suggest what to try." if no_results else "Answer naturally based on the available properties above."}"""
 
+    response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
     ai_response = response.content
+
     memory.chat_memory.add_user_message(user_query)
     memory.chat_memory.add_ai_message(ai_response)
+
+    # ── CALL 2: Decide follow-up actions ──
+    action_decision = decide_actions(
+        user_query=user_query,
+        classification_type=classification_type,
+        matched_listings=matched_listings,
+        filters=filters,
+        search_history=search_history,
+        channel=channel,
+        history_text=history_text
+    )
 
     return {
         "response": ai_response,
         "listings": matched_listings,
-        "filters": filters
+        "filters": filters,
+        "follow_up": action_decision.get("follow_up"),
+        "actions": action_decision.get("actions", []),
+        "meta": {
+            "no_results": no_results,
+            "action": action_label,
+        }
     }
-
-
-# Test
-if __name__ == "__main__":
-    print("Test 1 — DHA search")
-    r1 = get_response("I want a 3 bed house in DHA Karachi under 2 crore 50 lac with parking")
-    print(r1["response"])
-    for l in r1["listings"]:
-        print(f"  - {l['metadata']['title']} | {l['metadata']['price']}")
-
-    print("\n" + "="*50)
-    print("Test 2 — Clifton search")
-    r2 = get_response("show me apartments in Clifton with sea view")
-    print(r2["response"])
-    for l in r2["listings"]:
-        print(f"  - {l['metadata']['title']} | {l['metadata']['price']}")
-
-    print("\n" + "="*50)
-    print("Test 3 — Nazimabad search")
-    r3 = get_response("what options do you have in North Nazimabad")
-    print(r3["response"])
-
-    print("\n" + "="*50)
-    print("Test 4 — follow up on DHA specifically")
-    r4 = get_response("btw what's the street situation in those DHA properties?")
-    print(r4["response"])
-    print("Listings used:", [l['metadata']['title'] for l in r4["listings"]])
-
-    print("\n" + "="*50)
-    print("Test 5 — follow up on Clifton specifically")
-    r5 = get_response("which of the Clifton apartments has the best sea view?")
-    print(r5["response"])
-    print("Listings used:", [l['metadata']['title'] for l in r5["listings"]])

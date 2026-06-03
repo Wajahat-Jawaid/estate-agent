@@ -235,15 +235,39 @@
 
   .prop-card {
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 12px 14px;
+    border-radius: var(--radius); padding: 0;
     transition: all 0.2s; cursor: pointer;
     animation: cardIn 0.3s ease forwards; opacity: 0;
+    overflow: hidden;
   }
 
   @keyframes cardIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
   .prop-card:hover { box-shadow: var(--shadow-hover); border-color: var(--green-mid); transform: translateY(-1px); }
   .prop-card.best { border-color: var(--gold); }
+
+  .prop-img {
+    width: 100%; height: 162px; object-fit: cover; display: block;
+    background: var(--green-pale); transition: transform 0.35s ease;
+  }
+  .prop-card:hover .prop-img { transform: scale(1.04); }
+
+  .prop-card-body { padding: 11px 14px; }
+
+  .prop-gallery {
+    display: flex; gap: 5px; overflow-x: auto; padding-bottom: 2px; margin-top: 8px;
+  }
+  .prop-gallery::-webkit-scrollbar { height: 3px; }
+  .prop-gallery::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .prop-gallery-thumb {
+    width: 68px; height: 50px; flex-shrink: 0;
+    object-fit: cover; border-radius: 6px;
+    cursor: pointer; border: 2px solid transparent;
+    transition: all 0.15s; opacity: 0.65;
+  }
+  .prop-gallery-thumb:hover { opacity: 1; }
+  .prop-gallery-thumb.active { border-color: var(--green); opacity: 1; }
 
   .prop-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 3px; }
   .prop-title { font-family: 'Playfair Display', serif; font-size: 13px; color: var(--text); line-height: 1.3; }
@@ -304,7 +328,7 @@
   .show-more-btn:hover { background: var(--green-pale); border-style: solid; }
 
   .skeleton-card {
-    height: 120px; border-radius: var(--radius);
+    height: 280px; border-radius: var(--radius);
     background: linear-gradient(90deg, var(--border) 25%, var(--bg) 50%, var(--border) 75%);
     background-size: 200% 100%; animation: shimmer 1.2s infinite;
   }
@@ -458,7 +482,29 @@
 </div>
 
 <script>
-  const API_URL = 'http://localhost:8000';
+  // Generate unique session ID per browser tab
+  let sessionId = localStorage.getItem('sessionId');
+  if (!sessionId) {
+      sessionId = 'web_' + Math.random().toString(36).substr(2, 9);
+      localStorage.setItem('sessionId', sessionId);
+  }
+
+  function formatPrice(price) {
+    const croreMatch = price.match(/(\d+)\s*crore/);
+    const lacMatch = price.match(/(\d+)\s*lac/);
+    const crore = croreMatch ? parseInt(croreMatch[1]) : 0;
+    const lac = lacMatch ? parseInt(lacMatch[1]) : 0;
+    if (crore && lac) {
+      const decimal = (crore + lac / 100).toFixed(2).replace(/\.?0+$/, '');
+      return `${decimal} crore`;
+    }
+    if (crore) return `${crore} crore`;
+    return `${lac} lac`;
+  }
+
+  const API_URL = window.location.hostname === 'localhost'
+  ? 'http://localhost:8000' 
+  : 'https://backlog-defective-retreat.ngrok-free.dev';
   let isLoading = false;
   let allListings = [];
 
@@ -677,52 +723,81 @@
           : (m.features || []);
       } catch(e) { features = []; }
 
+      let images = [];
+      try {
+        images = typeof m.images === 'string' ? JSON.parse(m.images) : (m.images || []);
+      } catch(e) { images = []; }
+      if (m.image_url && !images.includes(m.image_url)) images.unshift(m.image_url);
+
+      const heroUrl = images[0] || '';
+
       const featureTags = features.length
         ? features.map(f => `<span class="tag match">${f}</span>`).join('')
         : '<span class="tag">No features listed</span>';
+
+      const galleryThumbs = images.slice(0, 10).map((url, idx) =>
+        `<img class="prop-gallery-thumb${idx === 0 ? ' active' : ''}" data-src="${url}" src="${url}"
+              alt="photo ${idx+1}" loading="lazy" onerror="this.style.display='none'">`
+      ).join('');
 
       const card = document.createElement('div');
       card.className = `prop-card${isBest ? ' best' : ''}`;
 
       card.innerHTML = `
-        <div class="prop-top">
-          <div class="prop-title">${m.title}</div>
-          <div class="prop-price">${m.price}</div>
-        </div>
-        <div class="prop-location">📍 ${m.location}</div>
-        <div class="prop-tags">
-          <span class="tag">${m.type}</span>
-          <span class="tag">${m.bedrooms} bed</span>
-          ${isBest ? '<span class="tag gold">⭐ Best match</span>' : ''}
-        </div>
-        <div class="match-row">
-          <span class="match-label">Match</span>
-          <div class="match-track">
-            <div class="match-fill" style="width: ${Math.max(score, 20)}%"></div>
+        ${heroUrl ? `<img class="prop-img" id="hero-${m.id}" src="${heroUrl}" alt="${m.title}" loading="lazy" onerror="this.style.display='none'">` : ''}
+        <div class="prop-card-body">
+          <div class="prop-top">
+            <div class="prop-title">${m.title}</div>
+            <div class="prop-price">${formatPrice(m.price)}</div>
           </div>
-          <span class="match-pct">${score}%</span>
-        </div>
-        <div class="prop-agent">
-          <span>Agent: <strong>${m.agent}</strong></span>
-          <span>${m.contact}</span>
-        </div>
-        <div class="prop-details" id="details-${m.id}">
-          <div class="detail-row">
-            <span class="detail-key">Bathrooms</span>
-            <span class="detail-val">${m.bathrooms || '—'}</span>
+          <div class="prop-location">📍 ${m.location}</div>
+          <div class="prop-tags">
+            <span class="tag">${m.type}</span>
+            <span class="tag">${m.bedrooms} bed</span>
+            ${isBest ? '<span class="tag gold">⭐ Best match</span>' : ''}
           </div>
-          <div class="detail-row">
-            <span class="detail-key">Area</span>
-            <span class="detail-val">${m.area_sqyd || '—'} sq yards</span>
+          <div class="match-row">
+            <span class="match-label">Match</span>
+            <div class="match-track">
+              <div class="match-fill" style="width: ${Math.max(score, 20)}%"></div>
+            </div>
+            <span class="match-pct">${score}%</span>
           </div>
-          <div class="detail-row">
-            <span class="detail-key">Features</span>
+          <div class="prop-agent">
+            <span>Agent: <strong>${m.agent}</strong></span>
+            <span>${m.contact}</span>
           </div>
-          <div class="detail-features">${featureTags}</div>
+          <div class="prop-details" id="details-${m.id}">
+            <div class="detail-row">
+              <span class="detail-key">Bathrooms</span>
+              <span class="detail-val">${m.bathrooms || '—'}</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-key">Area</span>
+              <span class="detail-val">${m.area_sqyd || '—'} sq yards</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-key">Features</span>
+            </div>
+            <div class="detail-features">${featureTags}</div>
+            ${images.length > 1 ? `<div class="prop-gallery">${galleryThumbs}</div>` : ''}
+          </div>
+          <div class="expand-hint" id="hint-${m.id}">Tap to see details ▾</div>
         </div>
-        <div class="expand-hint" id="hint-${m.id}">Tap to see details ▾</div>
       `;
 
+      // Gallery thumb → swap hero image
+      card.querySelectorAll('.prop-gallery-thumb').forEach(thumb => {
+        thumb.addEventListener('click', e => {
+          e.stopPropagation();
+          const hero = document.getElementById(`hero-${m.id}`);
+          if (hero) hero.src = thumb.dataset.src;
+          card.querySelectorAll('.prop-gallery-thumb').forEach(t => t.classList.remove('active'));
+          thumb.classList.add('active');
+        });
+      });
+
+      // Card body click → expand/collapse details
       card.addEventListener('click', () => {
         const details = document.getElementById(`details-${m.id}`);
         const hint = document.getElementById(`hint-${m.id}`);
@@ -756,7 +831,7 @@
       const res = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message })
+        body: JSON.stringify({ message, session_id: sessionId })
       });
 
       const data = await res.json();

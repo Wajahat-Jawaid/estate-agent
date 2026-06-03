@@ -25,6 +25,7 @@ def price_to_lacs(price_str: str) -> int:
 
 def listing_to_text(listing):
     features = ", ".join(listing["features"])
+    amenities = ", ".join(listing.get("amenities", []))
     return f"""
 Property ID: {listing['id']}
 Title: {listing['title']}
@@ -35,8 +36,10 @@ Area: {listing['area_sqyd']} square yards
 Price: {listing['price']}
 Location: {listing['location']}
 Features: {features}
+Amenities: {amenities}
 Agent: {listing['agent']}
 Contact: {listing['contact']}
+Map: {listing.get('map_url', '')}
 """.strip()
 
 # Load listings
@@ -57,7 +60,13 @@ metadatas = [
         "bedrooms": l["bedrooms"],
         "contact": l["contact"],
         "features": json.dumps(l["features"]),
-        "agent": l["agent"]
+        "agent": l["agent"],
+        "image_url": l.get("image_url", ""),
+        "images": json.dumps(l.get("images", [])),
+        "bathrooms": l.get("bathrooms", 0),
+        "area_sqyd": l.get("area_sqyd", 0),
+        "map_url": l.get("map_url", ""),
+        "amenities": json.dumps(l.get("amenities", [])),
     }
     for l in listings
 ]
