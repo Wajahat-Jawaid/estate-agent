@@ -239,6 +239,7 @@
     transition: all 0.2s; cursor: pointer;
     animation: cardIn 0.3s ease forwards; opacity: 0;
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   @keyframes cardIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
@@ -513,17 +514,19 @@
   function setFilterBarFromAI(filters) {
     let anySet = false;
 
-    if (filters.location) {
+    const location = filters.location || (filters.locations && filters.locations[0]);
+    if (location) {
       const el = document.getElementById('fb-location');
-      el.value = filters.location;
+      el.value = location;
       el.classList.add('ai-set');
       anySet = true;
     }
 
-    if (filters.type) {
+    const type = filters.type || (filters.types && filters.types[0]);
+    if (type) {
       const sel = document.getElementById('fb-type');
       for (let opt of sel.options) {
-        if (opt.value.toLowerCase() === filters.type.toLowerCase()) {
+        if (opt.value.toLowerCase() === type.toLowerCase()) {
           sel.value = opt.value; break;
         }
       }

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import json
 import re
@@ -7,6 +8,7 @@ from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
+from mortgage_handler import MortgageConversationHandler
 
 load_dotenv()
 
@@ -18,15 +20,15 @@ vectorstore = Chroma(
 )
 
 llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    # model="llama-3.1-8b-instant",
+    # model="llama-3.3-70b-versatile",
+    model="llama-3.1-8b-instant",
     api_key=os.getenv("GROQ_API_KEY"),
     temperature=0.7
 )
 
 llm_fast = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    # model="llama-3.1-8b-instant",
+    # model="llama-3.3-70b-versatile",
+    model="llama-3.1-8b-instant",
     api_key=os.getenv("GROQ_API_KEY"),
     temperature=0.1  # low temp for structured decisions
 )
@@ -34,6 +36,8 @@ llm_fast = ChatGroq(
 # Per-user memory and search history
 user_memories = {}
 user_search_histories = {}
+
+_mortgage_handler = MortgageConversationHandler()
 
 def get_user_memory(user_id: str) -> ConversationBufferMemory:
     if user_id not in user_memories:
@@ -88,13 +92,52 @@ Return only raw JSON. No explanation. No markdown. No backticks."""
     except:
         return {}
 
-def classify_query(query: str, search_history: list) -> dict:
-    if not search_history:
-        return {"type": "NEWSEARCH", "index": None}
+_REVERSE_MORTGAGE_PATTERNS = [
+    r"\b\d+(?:\.\d+)?\s*(?:lakh|lac|crore)\s*(?:mein|main|me)\s*(?:kya|kia)\b",
+    r"\bmonthly\s+budget\s*(?:hai|is|of)?\s*\d",
+    r"\b\d+(?:\.\d+)?\s*(?:lakh|lac|crore)\s+(?:per|har)\s+(?:month|mahina|maheena)\b",
+    r"\bmonthly\s+\d+(?:\.\d+)?\s*(?:lakh|lac|crore)\b",
+    r"\b\d+(?:\.\d+)?\s*(?:lakh|lac|crore)\s*(?:monthly|per\s+month|har\s+month)\b",
+    r"\bbudget\s+(?:hai|mera|meri|hamara)?\s*\d+\s*(?:lakh|lac|crore)\b",
+]
 
+_MORTGAGE_EXPLICIT_KW = {
+    "home loan", "installment", "instalment", "mortgage",
+    "down payment", "downpayment", "afford kar sakta", "afford ho sakta",
+    "kitna loan", "loan milega", "bank loan", "qist", "qarz",
+    "monthly kitna", "monthly payment", "interest rate", "bank financing",
+    "finance kar sakta", "housing loan", "property loan", "griha loan",
+}
+
+_AFFORDABILITY_HINT_KW = {
+    "too expensive", "bohot mehnga", "bohat mehnga", "bahut mehnga",
+    "budget mein nahi", "budget nahi hai", "afford nahi",
+    "ziada mehnga", "zyada mehnga", "budget se bahar",
+    "affordable nahi", "mehnga lag raha", "thoda kam price chahiye",
+}
+
+
+def detect_mortgage_intent(query: str) -> str | None:
+    """Fast regex-based mortgage intent detection — no LLM call."""
+    q = query.lower()
+    for pattern in _REVERSE_MORTGAGE_PATTERNS:
+        if re.search(pattern, q):
+            return "REVERSE_MORTGAGE"
+    if re.search(r"\bemi\b", q) or re.search(r"\bloan\b", q) or re.search(r"\binstall?ment\b", q) or re.search(r"\bafford\b", q):
+        return "MORTGAGE_EXPLICIT"
+    if any(kw in q for kw in _MORTGAGE_EXPLICIT_KW):
+        return "MORTGAGE_EXPLICIT"
+    if any(kw in q for kw in _AFFORDABILITY_HINT_KW):
+        return "AFFORDABILITY_HINT"
+    return None
+
+
+def classify_query(query: str, search_history: list) -> dict:
     history_summary = ""
     for i, entry in enumerate(search_history):
         history_summary += f"Search {i}: {entry['topic']}\n"
+    if not history_summary:
+        history_summary = "(no previous searches)"
 
     prompt = f"""Classify this real estate chatbot query.
 
@@ -117,6 +160,12 @@ LARGER — wants bigger/larger/more rooms than what was shown
 
 IMAGES — wants to see photos/pictures/images of a property already shown. May reference a property number (e.g. "images of property 2", "show me photos of the first one")
 
+MORTGAGE_EXPLICIT — user directly asks about EMI, loan, installment, or affordability calculation (kitna loan milega, EMI kya hogi, monthly installment, home loan, afford kar sakta hun)
+
+AFFORDABILITY_HINT — user hints price is a concern but doesn't request a calculation (too expensive, mehnga hai, budget mein nahi, afford nahi kar sakta) — NOT a request for cheaper listings
+
+REVERSE_MORTGAGE — user states a monthly budget and asks what property they can afford (2 lakh mein kya milega, monthly X budget hai, X per month afford kar sakta)
+
 Return ONLY valid JSON with no explanation:
 {{"type": "NEWSEARCH", "index": null, "property_num": null}}
 {{"type": "FOLLOWUP", "index": 0, "property_num": null}}
@@ -124,6 +173,9 @@ Return ONLY valid JSON with no explanation:
 {{"type": "LARGER", "index": 0, "property_num": null}}
 {{"type": "SMALLTALK", "index": null, "property_num": null}}
 {{"type": "IMAGES", "index": 0, "property_num": 2}}
+{{"type": "MORTGAGE_EXPLICIT", "index": null, "property_num": null}}
+{{"type": "AFFORDABILITY_HINT", "index": null, "property_num": null}}
+{{"type": "REVERSE_MORTGAGE", "index": null, "property_num": null}}
 
 Index = which previous search is being referenced. Default to last search index if unclear.
 property_num = 1-based property number the user referenced (null if not specified)."""
@@ -351,6 +403,43 @@ No explanation. No markdown. No backticks."""
             return {"follow_up": "Want to try a different area or adjust your budget?", "actions": [{"id": "different_area", "label": "🗺️ Different area"}, {"id": "increase_budget", "label": "💰 Adjust budget"}]}
         return {"follow_up": None, "actions": [{"id": "contact", "label": "📞 Agent contacts"}, {"id": "new_search", "label": "🔍 New search"}]}
 
+def _handle_mortgage_intent(intent: str, user_id: str, query: str, search_history: list) -> dict:
+    """Route a detected mortgage intent to the appropriate handler."""
+    context_price_rupees = None
+    if search_history:
+        last_listings = search_history[-1].get("listings", [])
+        if last_listings:
+            price_numeric = last_listings[0]["metadata"].get("price_numeric")
+            if price_numeric:
+                context_price_rupees = int(price_numeric) * 100_000  # lacs → rupees
+
+    if intent == "MORTGAGE_EXPLICIT":
+        return _mortgage_handler.handle_mortgage_explicit(user_id, query, context_price_rupees=context_price_rupees)
+
+    if intent == "AFFORDABILITY_HINT":
+        return _mortgage_handler.handle_affordability_hint(user_id, query)
+
+    if intent == "REVERSE_MORTGAGE":
+        result = _mortgage_handler.handle_reverse_mortgage(user_id, query)
+        if result["meta"].get("trigger_search"):
+            max_lacs = result["meta"]["max_price_lacs"]
+            filters = {"max_price": lacs_to_price(max_lacs)}
+            search_results = search_properties(query, filters)
+            search_results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
+            matched_listings, context = _results_to_listings(search_results)
+            result["listings"] = matched_listings
+            topic = f"budget ≤ {lacs_to_price(max_lacs)}"
+            search_history.append({
+                "topic": topic,
+                "listings": matched_listings,
+                "context": context,
+                "filters": filters,
+            })
+        return result
+
+    return {"response": "Let me help with that mortgage question!", "listings": [], "filters": {}, "follow_up": None, "actions": [], "meta": {"no_results": False}}
+
+
 def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
     memory = get_user_memory(user_id)
     search_history = get_user_search_history(user_id)
@@ -358,6 +447,21 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
     # Conversation history
     history = memory.chat_memory.messages
     history_text = ""
+
+    # ── Mortgage slot filling: continue active mortgage conversation ──
+    slot_result = _mortgage_handler.handle_slot_filling(user_id, user_query)
+    if slot_result:
+        memory.chat_memory.add_user_message(user_query)
+        memory.chat_memory.add_ai_message(slot_result["response"])
+        return slot_result
+
+    # ── Mortgage intent pre-detection (regex, no LLM) ──
+    mortgage_intent = detect_mortgage_intent(user_query)
+    if mortgage_intent:
+        result = _handle_mortgage_intent(mortgage_intent, user_id, user_query, search_history)
+        memory.chat_memory.add_user_message(user_query)
+        memory.chat_memory.add_ai_message(result["response"])
+        return result
 
     # Quick small talk check before full classification
     quick_check = llm_fast.invoke([HumanMessage(content=f"""Is this a greeting or small talk unrelated to property search?
@@ -451,6 +555,13 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             memory.chat_memory.add_user_message(user_query)
             memory.chat_memory.add_ai_message(ai_response)
             return {"response": ai_response, "listings": [], "filters": {}, "follow_up": None, "actions": [], "meta": {"no_results": False, "action": None}}
+
+        # MORTGAGE intents (LLM fallback path — regex pre-check above handles most cases)
+        if classification_type in ("MORTGAGE_EXPLICIT", "AFFORDABILITY_HINT", "REVERSE_MORTGAGE"):
+            result = _handle_mortgage_intent(classification_type, user_id, user_query, search_history)
+            memory.chat_memory.add_user_message(user_query)
+            memory.chat_memory.add_ai_message(result["response"])
+            return result
 
         # LARGER
         if classification_type == "LARGER" and search_history:

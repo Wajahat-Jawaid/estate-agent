@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 import httpx
 from agent import get_response, get_user_memory, user_memories, user_search_histories, price_to_lacs, lacs_to_price
+from mortgage_handler import user_mortgage_states
 
 # ── Persist welcomed users across restarts ──
 _WELCOMED_FILE = "data/welcomed_users.json"
@@ -242,12 +243,14 @@ async def whatsapp_webhook(request: Request):
                 "increase_budget": "I can increase my budget, show me more options",
                 "different_area": "show me options in different areas",
                 "reset": "__RESET__",
-                "new_search": "I want to start a new search",
+                "within_budget": "show me properties within my budget",
+                "calculate_emi": "calculate EMI for this property",
             }
 
             if action_id == "reset" or action_query_map.get(action_id) == "__RESET__":
                 user_memories.pop(from_number, None)
                 user_search_histories.pop(from_number, None)
+                user_mortgage_states.pop(from_number, None)
                 async with httpx.AsyncClient() as client:
                     await client.post(META_URL, headers=WA_HEADERS,
                                       json=wa_text(from_number, "All cleared! What property are you looking for? 🏠"))
@@ -269,6 +272,7 @@ async def whatsapp_webhook(request: Request):
             if user_message.strip().lower() in ["reset", "start over", "exit", "clear"]:
                 user_memories.pop(from_number, None)
                 user_search_histories.pop(from_number, None)
+                user_mortgage_states.pop(from_number, None)
                 async with httpx.AsyncClient() as client:
                     await client.post(META_URL, headers=WA_HEADERS,
                                       json=wa_text(from_number, "All cleared! What property are you looking for? 🏠"))
@@ -381,9 +385,21 @@ async def whatsapp_webhook(request: Request):
                 print(f">> No-results: {r.status_code} {r.text[:100]}")
 
             else:
-                # Small talk / greeting — plain text
+                # No listings — plain text (small talk, mortgage result, affordability hint, etc.)
                 r = await client.post(META_URL, headers=WA_HEADERS, json=wa_text(from_number, ai_response))
                 print(f">> Text: {r.status_code}")
+                # Send follow-up action buttons if present (e.g. after mortgage result)
+                if follow_up and actions:
+                    await asyncio.sleep(0.5)
+                    if len(actions) <= 3:
+                        buttons = actions_to_wa_buttons(actions)
+                        r = await client.post(META_URL, headers=WA_HEADERS,
+                                              json=wa_buttons(from_number, follow_up, buttons))
+                    else:
+                        rows = actions_to_wa_rows(actions)
+                        r = await client.post(META_URL, headers=WA_HEADERS,
+                                              json=wa_list(from_number, follow_up, "Options", rows))
+                    print(f">> Actions: {r.status_code}")
 
         return {"status": "ok"}
 
@@ -397,6 +413,7 @@ async def whatsapp_webhook(request: Request):
 def reset():
     user_memories.clear()
     user_search_histories.clear()
+    user_mortgage_states.clear()
     return {"status": "reset"}
 
 @app.get("/health")
