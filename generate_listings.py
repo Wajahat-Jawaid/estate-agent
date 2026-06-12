@@ -210,13 +210,14 @@ def main() -> None:
     print(f"Written {len(listings)} listings → {out_path}\n")
 
     # ------------------------------------------------------------------
-    # Summary table
+    # Summary table  (price column = MEDIAN, not mean — real estate prices
+    # are right-skewed; a few large plots inflate the mean well above a
+    # typical property, so median reflects the true "typical" price.)
     # ------------------------------------------------------------------
     subarea_to_parent: dict[str, str] = {
         s: parent for parent, subs in SUBAREAS.items() for s in subs
     }
 
-    # in the stats defaultdict, replace "price_sum": 0 with "prices": []
     stats: dict[str, dict] = defaultdict(
         lambda: {"count": 0, "prices": [], "sqyd_sum": 0, "types": defaultdict(int)}
     )
@@ -228,9 +229,6 @@ def main() -> None:
         stats[parent]["sqyd_sum"] += p["area_sqyd"]
         stats[parent]["types"][p["type"]] += 1
 
-    # in the print loop, replace s['price_sum']/n with the median:
-    med = statistics.median(s["prices"])
-    
     print(f"{'Area':<32} {'N':>4}  {'Med Lac':>9}  {'Avg Sqyd':>9}  Type split")
     print("-" * 105)
     for area in sorted(stats, key=lambda a: stats[a]["count"], reverse=True):

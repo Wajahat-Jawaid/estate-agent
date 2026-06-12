@@ -89,7 +89,7 @@ def wa_list(to, body, button_label, rows):
         }
     }
 
-def build_property_caption(m: dict, index: int, rental_yield: dict | None = None) -> str:
+def build_property_caption(m: dict, index: int, rental_yield = None) -> str:
     title = m.get("title", "Property").title()
     lines = []
 

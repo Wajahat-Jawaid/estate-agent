@@ -135,8 +135,8 @@ HOUSE_RATES = {
     # PECHS (rank 3): clamped [KDA_mid=38400, DHA_mid=39700], spread ±6% around 39100
     "PECHS Block 2": 39700, "PECHS Block 6": 39000, "PECHS Block 3": 38400,
     # Askari (individual rates from ranking)
-    "Askari 5": 33200, "Askari 4": 33000, "Askari 1": 32700,
-    "Askari 3": 32500, "Askari 2": 31900,
+    "Askari 5": 32000, "Askari 4": 31700, "Askari 1": 31400,
+    "Askari 3": 31000, "Askari 2": 30700,
     # Gulshan-e-Iqbal (rank 8): clamped [Askari1_mid=35200, Askari4_mid=36500], spread ±6% around 35800
     "Gulshan-e-Iqbal Block 2": 36500, "Gulshan-e-Iqbal Block 3": 36400,
     "Gulshan-e-Iqbal Block 4": 36200, "Gulshan-e-Iqbal Block 7": 36100,
@@ -201,8 +201,8 @@ APARTMENT_RATES_BY_AREA = {
     # Landmark towers (unchanged)
     "Emaar": 57000, "Marina Tower": 57000, "Ocean Tower": 57000,
     # Askari (individual)
-    "Askari 5": 35000, "Askari 4": 34300, "Askari 1": 32700,
-    "Askari 3": 31900, "Askari 2": 31100,
+    "Askari 5": 31800, "Askari 4": 31500, "Askari 1": 31000,
+    "Askari 3": 30300, "Askari 2": 30100,
     # Gulshan-e-Iqbal (rank 8): clamped [Askari1_apt=32700, Askari4_apt=34300], spread ±6% around 33500
     "Gulshan-e-Iqbal Block 2": 34300, "Gulshan-e-Iqbal Block 3": 34100,
     "Gulshan-e-Iqbal Block 4": 34000, "Gulshan-e-Iqbal Block 7": 33800,
