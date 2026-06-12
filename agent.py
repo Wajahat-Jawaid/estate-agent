@@ -6,9 +6,11 @@ from dotenv import load_dotenv
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from mortgage_handler import MortgageConversationHandler
+from rental_yield import estimate_rent
 
 load_dotenv()
 
@@ -32,6 +34,18 @@ llm_fast = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
     temperature=0.1  # low temp for structured decisions
 )
+
+# llm = ChatOpenAI(
+#     model="gpt-5.4-mini",
+#     api_key=os.getenv("OPENAI_API_KEY"),
+#     temperature=0.7
+# )
+
+# llm_fast = ChatOpenAI(
+#     model="gpt-5.4-mini",
+#     api_key=os.getenv("OPENAI_API_KEY"),
+#     temperature=0.1  # low temp for structured decisions
+# )
 
 # Per-user memory and search history
 user_memories = {}
@@ -116,6 +130,30 @@ _AFFORDABILITY_HINT_KW = {
     "affordable nahi", "mehnga lag raha", "thoda kam price chahiye",
 }
 
+# Investment intent — checked BEFORE mortgage regex so "invest X crore" never
+# gets swallowed by REVERSE_MORTGAGE patterns.
+_INVESTMENT_KW = {
+    "invest", "investment", "best yield", "best return", "rental return",
+    "rental income", "passive income", "kahan invest", "invest karna",
+    "best area to invest", "highest yield", "maximum return", "paisa lagana",
+    "paisa invest", "return milega", "yield chahiye",
+}
+
+def detect_investment_intent(query: str) -> bool:
+    q = query.lower()
+    return any(kw in q for kw in _INVESTMENT_KW)
+
+def _extract_investment_budget(query: str) -> int | None:
+    """Regex-only budget extraction for investment queries (no LLM call)."""
+    q = query.lower()
+    crore_m = re.search(r'(\d+(?:\.\d+)?)\s*crore', q)
+    lac_m   = re.search(r'(\d+)\s*lac', q)
+    if crore_m:
+        return int(float(crore_m.group(1)) * 100) + (int(lac_m.group(1)) if lac_m else 0)
+    if lac_m:
+        return int(lac_m.group(1))
+    return None
+
 
 def detect_mortgage_intent(query: str) -> str | None:
     """Fast regex-based mortgage intent detection — no LLM call."""
@@ -164,7 +202,15 @@ MORTGAGE_EXPLICIT — user directly asks about EMI, loan, installment, or afford
 
 AFFORDABILITY_HINT — user hints price is a concern but doesn't request a calculation (too expensive, mehnga hai, budget mein nahi, afford nahi kar sakta) — NOT a request for cheaper listings
 
-REVERSE_MORTGAGE — user states a monthly budget and asks what property they can afford (2 lakh mein kya milega, monthly X budget hai, X per month afford kar sakta)
+REVERSE_MORTGAGE — user states a monthly budget and asks what property they can afford (2 lakh mein kya milega, monthly X budget hai, X per month afford kar sakta). The user is asking about AFFORDABILITY from INCOME, not capital deployment.
+
+INVESTMENT — user has a lump-sum capital and wants to know which areas/properties give the best rental yield, with NO fixed location in mind. The user is choosing WHERE to deploy capital for passive income, not asking what they can afford.
+  ✓ "invest 1 crore for best yield"
+  ✓ "kahan invest karun best return ke liye"
+  ✓ "best area to invest 50 lac for rental income"
+  ✓ "passive income ke liye property kahan lun"
+  ✗ NOT INVESTMENT if a specific location is stated ("invest in DHA?" → NEWSEARCH)
+  ✗ NOT INVESTMENT if asking about monthly affordability → REVERSE_MORTGAGE
 
 Return ONLY valid JSON with no explanation:
 {{"type": "NEWSEARCH", "index": null, "property_num": null}}
@@ -176,6 +222,7 @@ Return ONLY valid JSON with no explanation:
 {{"type": "MORTGAGE_EXPLICIT", "index": null, "property_num": null}}
 {{"type": "AFFORDABILITY_HINT", "index": null, "property_num": null}}
 {{"type": "REVERSE_MORTGAGE", "index": null, "property_num": null}}
+{{"type": "INVESTMENT", "index": null, "property_num": null}}
 
 Index = which previous search is being referenced. Default to last search index if unclear.
 property_num = 1-based property number the user referenced (null if not specified)."""
@@ -309,19 +356,34 @@ def fetch_cheaper(locations: list, max_price_lacs: int, prev_filters: dict, k: i
     sorted_results = sorted(seen_ids.values(), key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
     return sorted_results[:k]
 
+GRID_VISIBLE_COUNT = 10  # must match frontend renderCards(listings.slice(0, N))
+
 def _results_to_listings(results: list) -> tuple:
+    """
+    Returns (matched_listings, context).
+    context only covers the first GRID_VISIBLE_COUNT results so the LLM
+    can only reference properties that are immediately visible in the grid.
+    """
     context = ""
     matched_listings = []
     raw = list(results)
     if not raw:
         return matched_listings, context
-    best = raw[0][1]
-    worst = raw[-1][1]
+    scores = [s for _, s in raw]
+    best = min(scores)
+    worst = max(scores)
     span = worst - best
-    for doc, score in raw:
-        context += f"\n---\n{doc.page_content}\n"
+    for i, (doc, score) in enumerate(raw):
+        if i < GRID_VISIBLE_COUNT:
+            context += f"\n---\n{doc.page_content}\n"
         norm = 95 if span == 0 else 95 - ((score - best) / span) * 23
-        matched_listings.append({"metadata": doc.metadata, "score": round(norm)})
+        meta = doc.metadata
+        rent = estimate_rent(
+            price_numeric=int(meta.get("price_numeric") or 0),
+            location=meta.get("location", ""),
+            property_type=meta.get("type", "house"),
+        )
+        matched_listings.append({"metadata": meta, "score": round(norm), "rental_yield": rent})
     return matched_listings, context
 
 def decide_actions(
@@ -440,6 +502,161 @@ def _handle_mortgage_intent(intent: str, user_id: str, query: str, search_histor
     return {"response": "Let me help with that mortgage question!", "listings": [], "filters": {}, "follow_up": None, "actions": [], "meta": {"no_results": False}}
 
 
+def _handle_investment_intent(user_query: str, user_id: str, search_history: list, channel: str = "web") -> dict:
+    """
+    Structured investment response: ranks tiers by yield for a lump-sum budget,
+    shows 2-3 tiers (highest yield first + a premium appreciation counterpoint),
+    each with a representative listing pulled from real stock.
+    """
+    from collections import defaultdict
+
+    budget_lacs = _extract_investment_budget(user_query)
+    if not budget_lacs:
+        return {
+            "response": "What's your investment budget? E.g. 1 crore, 50 lac, 2 crore 50 lac.",
+            "listings": [], "filters": {}, "follow_up": None, "actions": [],
+            "meta": {"no_results": False, "action": "investment"},
+        }
+
+    budget_str = lacs_to_price(budget_lacs)
+
+    try:
+        raw = vectorstore.similarity_search_with_score(
+            "rental investment property income yield",
+            k=80,
+            filter={"price_numeric": {"$lte": budget_lacs}},
+        )
+    except Exception:
+        raw = vectorstore.similarity_search_with_score("property", k=80)
+        raw = [(d, s) for d, s in raw if int(d.metadata.get("price_numeric") or 0) <= budget_lacs]
+
+    if not raw:
+        return {
+            "response": f"No properties found under {budget_str}. Try a higher budget.",
+            "listings": [], "filters": {}, "follow_up": None, "actions": [],
+            "meta": {"no_results": True, "action": "investment"},
+        }
+
+    # ── Annotate every doc with its yield estimate ───────────────────────────
+    annotated: list[tuple] = []  # (doc, score, rent_dict)
+    for doc, score in raw:
+        meta = doc.metadata
+        rent = estimate_rent(
+            price_numeric=int(meta.get("price_numeric") or 0),
+            location=meta.get("location", ""),
+            property_type=meta.get("type", "house"),
+        )
+        annotated.append((doc, score, rent))
+
+    # ── Bucket into yield bands ───────────────────────────────────────────────
+    # HIGH  ≥ 6.5 y_low  →  best monthly cash flow (Korangi-tier rates)
+    # MID   ≥ 5.5 y_low  →  balanced yield + appreciation (Gulshan-tier rates)
+    # PREMIUM < 5.5 y_low →  lowest yield but strongest resale (DHA/Clifton rates)
+    _BAND_BRIEF = {
+        "HIGH":    "Maximum monthly cash flow — suits income-focused investors. Weaker resale market.",
+        "MID":     "Solid monthly cash flow with established demand and balanced appreciation.",
+        "PREMIUM": "Lowest monthly yield but the strongest resale value and long-term capital appreciation.",
+    }
+
+    def _band(y_low: float) -> str:
+        if y_low >= 6.5:
+            return "HIGH"
+        if y_low >= 5.5:
+            return "MID"
+        return "PREMIUM"
+
+    band_docs: dict[str, list] = defaultdict(list)
+    for doc, score, rent in annotated:
+        band_docs[_band(rent["yield_low"])].append((doc, score, rent))
+
+    # Sort bands: HIGH first (best yield), then MID, then PREMIUM.
+    # Always include PREMIUM as appreciation counterpoint if it has listings.
+    yield_order = [b for b in ("HIGH", "MID", "PREMIUM") if b in band_docs]
+    display_bands: list[str] = list(yield_order[:2])
+    if "PREMIUM" in band_docs and "PREMIUM" not in display_bands:
+        display_bands.append("PREMIUM")
+
+    # ── Representative listing per band (highest price = best quality) ────────
+    def _rep(items: list) -> tuple:
+        return max(items, key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
+
+    # ── Build structured response text ───────────────────────────────────────
+    lines = [
+        f"For {budget_str} aimed at rental income, here's where it works hardest "
+        f"— these are area-level estimates, not guarantees:\n"
+    ]
+
+    for i, band in enumerate(display_bands):
+        rep_doc, _, rep_rent = _rep(band_docs[band])
+        meta = rep_doc.metadata
+        area_name = meta.get("location", "").split(",")[0]
+
+        pos_label = "Best yield" if i == 0 else ("Premium hold" if band == "PREMIUM" else "Balanced")
+        y_low, y_high = rep_rent["yield_low"], rep_rent["yield_high"]
+
+        lines.append(f"🔹 {pos_label} — {area_name} (est. {y_low}–{y_high}%)")
+        lines.append(
+            f"~PKR {rep_rent['monthly_rent_low']:,}–{rep_rent['monthly_rent_high']:,}/mo on a "
+            f"{lacs_to_price(int(meta.get('price_numeric', 0)))} property. {_BAND_BRIEF[band]}"
+        )
+        lines.append(
+            f"Example: {meta.get('title', 'Property').title()}, "
+            f"{area_name} — {meta.get('price', '')}"
+        )
+        lines.append("")
+
+    # ── LLM: 2-sentence tradeoff + next-step ─────────────────────────────────
+    rep_high = _rep(band_docs[display_bands[0]])
+    highest_area = rep_high[0].metadata.get("location", "").split(",")[0]
+    prem_band    = next((b for b in display_bands if b == "PREMIUM"), display_bands[-1])
+    premium_area = _rep(band_docs[prem_band])[0].metadata.get("location", "").split(",")[0]
+    band_areas   = " / ".join(
+        _rep(band_docs[b])[0].metadata.get("location", "").split(",")[0]
+        for b in display_bands
+    )
+
+    tradeoff = llm_fast.invoke([HumanMessage(content=
+        f"""Write exactly 2 sentences for a property investor:
+1. Start with "Quick read:" — contrast {highest_area} (best monthly yield) vs {premium_area} (lower yield but stronger resale). Be specific and direct.
+2. Ask if they want actual listings in any specific area ({band_areas}).
+Budget: {budget_str}. Match language of: "{user_query}" (Urdu or English). Conversational, not formal."""
+    )])
+    lines.append(tradeoff.content.strip())
+
+    # ── Build matched_listings for property cards ─────────────────────────────
+    seen_ids: set = set()
+    matched_listings = []
+    for band in display_bands:
+        rep_doc, _, rep_rent = _rep(band_docs[band])
+        priority = [(rep_doc, rep_rent)] + [
+            (d, r) for d, _, r in band_docs[band] if d is not rep_doc
+        ]
+        for doc, rent in priority[:3]:
+            doc_id = doc.metadata.get("id")
+            if doc_id in seen_ids:
+                continue
+            seen_ids.add(doc_id)
+            matched_listings.append({"metadata": doc.metadata, "score": 85, "rental_yield": rent})
+
+    filters = {"max_price": budget_str}
+    search_history.append({
+        "topic": f"investment ≤ {budget_str}",
+        "listings": matched_listings,
+        "context": "",
+        "filters": filters,
+    })
+    print(f">> Investment: budget={budget_str}, bands={display_bands}, listings={len(matched_listings)}")
+
+    return {
+        "response": "\n".join(lines),
+        "listings": matched_listings,
+        "filters": filters,
+        "follow_up": None,
+        "actions": [{"id": "new_search", "label": "🔍 New search"}],
+        "meta": {"no_results": False, "action": "investment"},
+    }
+
+
 def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
     memory = get_user_memory(user_id)
     search_history = get_user_search_history(user_id)
@@ -454,6 +671,14 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
         memory.chat_memory.add_user_message(user_query)
         memory.chat_memory.add_ai_message(slot_result["response"])
         return slot_result
+
+    # ── Investment intent pre-detection (keyword, no LLM) ──
+    # Must run BEFORE mortgage regex so "invest 1 crore" never hits REVERSE_MORTGAGE.
+    if detect_investment_intent(user_query):
+        result = _handle_investment_intent(user_query, user_id, search_history, channel)
+        memory.chat_memory.add_user_message(user_query)
+        memory.chat_memory.add_ai_message(result["response"])
+        return result
 
     # ── Mortgage intent pre-detection (regex, no LLM) ──
     mortgage_intent = detect_mortgage_intent(user_query)
@@ -500,7 +725,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
         if stripped == "4":
             action_label = "cheaper"
             classification_type = "CHEAPER"
-            shown = prev_listings[:5]
+            shown = prev_listings[:10]
             prices = [int(l["metadata"].get("price_numeric") or 0) for l in shown if l["metadata"].get("price_numeric")]
             if prices:
                 max_price_lacs = int(min(prices)) - 1
@@ -517,7 +742,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             action_label = "larger"
             classification_type = "LARGER"
             filters = {k: v for k, v in prev_filters.items()}
-            shown_beds = [l["metadata"].get("bedrooms", 0) for l in prev_listings[:5] if l["metadata"].get("bedrooms")]
+            shown_beds = [l["metadata"].get("bedrooms", 0) for l in prev_listings[:10] if l["metadata"].get("bedrooms")]
             base_beds = prev_filters.get("bedrooms") or (max(shown_beds) if shown_beds else 3)
             new_beds = base_beds + 1
             filters["bedrooms"] = new_beds
@@ -563,6 +788,13 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             memory.chat_memory.add_ai_message(result["response"])
             return result
 
+        # INVESTMENT (LLM fallback — keyword pre-check above handles most cases)
+        if classification_type == "INVESTMENT":
+            result = _handle_investment_intent(user_query, user_id, search_history, channel)
+            memory.chat_memory.add_user_message(user_query)
+            memory.chat_memory.add_ai_message(result["response"])
+            return result
+
         # LARGER
         if classification_type == "LARGER" and search_history:
             action_label = "larger"
@@ -571,7 +803,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             prev_filters = last.get("filters", {})
             prev_listings = last["listings"]
             locations = prev_filters.get("locations", [])
-            shown_beds = [l["metadata"].get("bedrooms", 0) for l in prev_listings[:5] if l["metadata"].get("bedrooms")]
+            shown_beds = [l["metadata"].get("bedrooms", 0) for l in prev_listings[:10] if l["metadata"].get("bedrooms")]
             base_beds = prev_filters.get("bedrooms") or (max(shown_beds) if shown_beds else 3)
             new_beds = base_beds + 1
             filters = {k: v for k, v in prev_filters.items()}
@@ -591,7 +823,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             prev_filters = last.get("filters", {})
             prev_listings = last["listings"]
             locations = prev_filters.get("locations", [])
-            shown = prev_listings[:5]
+            shown = prev_listings[:10]
             prices = [int(l["metadata"].get("price_numeric") or 0) for l in shown if l["metadata"].get("price_numeric")]
             if prices:
                 max_price_lacs = int(min(prices)) - 1
@@ -694,14 +926,20 @@ Rules:
 - Speak like a helpful friend
 - Match the user's language (Urdu or English)"""
     else:
-        system_prompt = """You are a helpful real estate assistant. Keep responses SHORT and NATURAL.
+        system_prompt = f"""You are a helpful real estate assistant. Keep responses SHORT and NATURAL.
 Rules:
 - Maximum 2 sentences
-- Never say "I'm sorry", "I apologize", "database", or anything formal  
+- Never say "I'm sorry", "I apologize", "database", or anything formal
 - Speak like a knowledgeable friend, not customer service
-- Reference the best 1-2 options naturally with price if relevant
-- Never invent details not in the listings
-- Match the user's language (Urdu or English)"""
+- NEVER repeat back criteria the user already stated in their query — they know what they searched for
+- Instead, ADD information they couldn't already know: standout amenities, size (sq yd), what makes it worth considering, value vs other options, notable features (sea view, gated community, pool, etc.)
+- If the query already specifies location + type + bedrooms, skip restating those — lead with price and then a differentiating detail
+- Reference the best 1-2 options using their location and price (e.g. "the 2 crore house in DHA Phase 5")
+- NEVER reference any property by ID number — not from current results and not from conversation history
+- Never invent details not in the 'Available properties' section below
+- Match the user's language (Urdu or English)
+
+User's query (treat this as already-known context — do NOT repeat it back): "{user_query}" """
 
     user_prompt = f"""Conversation history:
 {history_text}

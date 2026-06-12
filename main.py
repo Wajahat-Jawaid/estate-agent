@@ -89,7 +89,7 @@ def wa_list(to, body, button_label, rows):
         }
     }
 
-def build_property_caption(m: dict, index: int) -> str:
+def build_property_caption(m: dict, index: int, rental_yield: dict | None = None) -> str:
     title = m.get("title", "Property").title()
     lines = []
 
@@ -116,6 +116,13 @@ def build_property_caption(m: dict, index: int) -> str:
         lines.append(f"*Size:* {m['area_sqyd']} sq yd")
     if m.get("map_url"):
         lines.append(f"*Map:* {m['map_url']}")
+
+    if rental_yield:
+        lo  = f"{rental_yield['monthly_rent_low']:,}"
+        hi  = f"{rental_yield['monthly_rent_high']:,}"
+        ylo = rental_yield['yield_low']
+        yhi = rental_yield['yield_high']
+        lines.append(f"💰 Est. rent: PKR {lo}–{hi}/mo (~{ylo}–{yhi}% yield, area est.)")
 
     agent = m.get("agent", "N/A")
     contact = m.get("contact", "")
@@ -341,7 +348,7 @@ async def whatsapp_webhook(request: Request):
                 # Send each property card and track wamid for reply resolution
                 for i, listing in enumerate(listings[:5], 1):
                     m = listing["metadata"]
-                    caption = build_property_caption(m, i)
+                    caption = build_property_caption(m, i, listing.get("rental_yield"))
                     r = await client.post(META_URL, headers=WA_HEADERS, json=wa_text(from_number, caption))
                     print(f">> Property {i}: {r.status_code}")
                     try:

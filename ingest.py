@@ -24,7 +24,6 @@ def price_to_lacs(price_str: str) -> int:
     return (crore * 100) + lac
 
 def listing_to_text(listing):
-    features = ", ".join(listing["features"])
     amenities = ", ".join(listing.get("amenities", []))
     return f"""
 Property ID: {listing['id']}
@@ -35,7 +34,6 @@ Bathrooms: {listing['bathrooms']}
 Area: {listing['area_sqyd']} square yards
 Price: {listing['price']}
 Location: {listing['location']}
-Features: {features}
 Amenities: {amenities}
 Agent: {listing['agent']}
 Contact: {listing['contact']}
@@ -59,7 +57,6 @@ metadatas = [
         "type": l["type"],
         "bedrooms": l["bedrooms"],
         "contact": l["contact"],
-        "features": json.dumps(l["features"]),
         "agent": l["agent"],
         "image_url": l.get("image_url", ""),
         "images": json.dumps(l.get("images", [])),
