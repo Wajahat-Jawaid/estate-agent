@@ -230,14 +230,15 @@ def main() -> None:
 
     # in the print loop, replace s['price_sum']/n with the median:
     med = statistics.median(s["prices"])
-    print(f"{area:<32} {n:>4}  {med:>9.0f}  {s['sqyd_sum']/n:>9.1f}  {split}")
-
+    
+    print(f"{'Area':<32} {'N':>4}  {'Med Lac':>9}  {'Avg Sqyd':>9}  Type split")
     print("-" * 105)
     for area in sorted(stats, key=lambda a: stats[a]["count"], reverse=True):
         s = stats[area]
         n = s["count"]
+        med = statistics.median(s["prices"])
         split = "  ".join(f"{t}:{c}" for t, c in sorted(s["types"].items(), key=lambda x: -x[1]))
-        print(f"{area:<32} {n:>4}  {s['price_sum']/n:>9.0f}  {s['sqyd_sum']/n:>9.1f}  {split}")
+        print(f"{area:<32} {n:>4}  {med:>9.0f}  {s['sqyd_sum']/n:>9.1f}  {split}")
 
     print(f"\nTotal: {sum(s['count'] for s in stats.values())}")
 
