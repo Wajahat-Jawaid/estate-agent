@@ -47,14 +47,12 @@ NON_DEMO_AREA_WEIGHTS = {
     "North Nazimabad":      10,
     "Bahria Town":          12,
     "Naya Nazimabad":        6,
-    "Malir Cantt":           5,
     "Malir":                 5,
     "Korangi":               6,
     "Landhi":                5,
     "North Karachi":         6,
     "New Karachi":           4,
     "KDA Scheme 1":          3,
-    "Defence View":          3,
     "Model Colony":          3,
     "Gulshan-e-Maymar":      4,
     "Gulshan-e-Hadeed":      3,
@@ -137,8 +135,8 @@ HOUSE_RATES = {
     # PECHS (rank 3): clamped [KDA_mid=38400, DHA_mid=39700], spread ±6% around 39100
     "PECHS Block 2": 39700, "PECHS Block 6": 39000, "PECHS Block 3": 38400,
     # Askari (individual rates from ranking)
-    "Askari 5": 37100, "Askari 4": 36500, "Askari 1": 35200,
-    "Askari 3": 34500, "Askari 2": 33900,
+    "Askari 5": 33200, "Askari 4": 33000, "Askari 1": 32700,
+    "Askari 3": 32500, "Askari 2": 31900,
     # Gulshan-e-Iqbal (rank 8): clamped [Askari1_mid=35200, Askari4_mid=36500], spread ±6% around 35800
     "Gulshan-e-Iqbal Block 2": 36500, "Gulshan-e-Iqbal Block 3": 36400,
     "Gulshan-e-Iqbal Block 4": 36200, "Gulshan-e-Iqbal Block 7": 36100,
@@ -166,8 +164,8 @@ HOUSE_RATES = {
     "Sector 35-A": 20700,
     # Single-rate areas
     "KDA Scheme 1": 38400, "Tariq Road": 37800, "North Nazimabad": 32600,
-    "Defence View": 31900, "Naya Nazimabad": 24200, "Nazimabad": 26600,
-    "Malir Cantt": 28900, "North Karachi": 25500, "Gulshan-e-Maymar": 26200,
+    "Naya Nazimabad": 24200, "Nazimabad": 26600,
+    "North Karachi": 25500, "Gulshan-e-Maymar": 26200,
     "Malir": 24300, "Safoora Goth": 23600, "Shah Faisal Colony": 22900,
     "Liaquatabad": 21400, "Korangi": 20000, "Model Colony": 19300,
     "Baldia Town": 18500, "New Karachi": 17800, "Airport Area": 17100,
@@ -228,8 +226,8 @@ APARTMENT_RATES_BY_AREA = {
     "FB Area Block 5": 23000,
     # Single-rate areas
     "KDA Scheme 1": 36600, "Tariq Road": 35800, "North Nazimabad": 29500,
-    "Defence View": 28700, "Naya Nazimabad": 21400, "Nazimabad": 23100,
-    "Malir Cantt": 26300, "North Karachi": 23000, "Gulshan-e-Maymar": 22500,
+    "Naya Nazimabad": 21400, "Nazimabad": 23100,
+    "North Karachi": 23000, "Gulshan-e-Maymar": 22500,
     "Malir": 21600, "Safoora Goth": 21100, "Shah Faisal Colony": 20600,
     "Liaquatabad": 19700, "Korangi": 18700, "Model Colony": 18200,
     "Baldia Town": 17800, "New Karachi": 17300, "Airport Area": 16800,
@@ -287,7 +285,7 @@ AREA_TO_PLOT_PROFILE = {
     "FB Area": "FB_SCHEME33", "Scheme 33": "FB_SCHEME33",
     "Naya Nazimabad": "GULSHAN", "North Nazimabad": "GULSHAN",
     "Nazimabad": "FB_SCHEME33", "KDA Scheme 1": "PECHS_ASKARI",
-    "Defence View": "GULSHAN", "Malir Cantt": "PECHS_ASKARI", "Malir": "FB_SCHEME33",
+    "Malir": "FB_SCHEME33",
     "Model Colony": "FB_SCHEME33",
     "Gulshan-e-Maymar": "FB_SCHEME33", "Gulshan-e-Hadeed": "BUDGET",
     "Shah Faisal Colony": "BUDGET", "Tariq Road": "FB_SCHEME33",
@@ -324,8 +322,8 @@ AREA_PREMIUM_LEVEL = {
     "DHA": "PREMIUM", "Clifton": "PREMIUM", "PECHS": "PREMIUM", "Askari": "PREMIUM",
     "Gulshan-e-Iqbal": "MID", "Gulistan-e-Johar": "MID", "FB Area": "MID",
     "Naya Nazimabad": "MID", "North Nazimabad": "MID", "Nazimabad": "MID",
-    "Scheme 33": "MID", "KDA Scheme 1": "MID", "Defence View": "MID",
-    "Malir Cantt": "MID", "Tariq Road": "MID", "Bahria Town": "MID",
+    "Scheme 33": "MID", "KDA Scheme 1": "MID", 
+    "Tariq Road": "MID", "Bahria Town": "MID",
 }
 
 APT_BED_SKEW = {

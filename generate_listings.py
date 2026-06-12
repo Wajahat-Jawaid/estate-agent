@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+import statistics
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data.listings_config import (
@@ -215,18 +216,22 @@ def main() -> None:
         s: parent for parent, subs in SUBAREAS.items() for s in subs
     }
 
+    # in the stats defaultdict, replace "price_sum": 0 with "prices": []
     stats: dict[str, dict] = defaultdict(
-        lambda: {"count": 0, "price_sum": 0, "sqyd_sum": 0, "types": defaultdict(int)}
+        lambda: {"count": 0, "prices": [], "sqyd_sum": 0, "types": defaultdict(int)}
     )
     for p in listings:
         loc = p["location"].split(",")[0].strip()
         parent = subarea_to_parent.get(loc, loc)
         stats[parent]["count"] += 1
-        stats[parent]["price_sum"] += price_str_to_lacs(p["price"])
+        stats[parent]["prices"].append(price_str_to_lacs(p["price"]))
         stats[parent]["sqyd_sum"] += p["area_sqyd"]
         stats[parent]["types"][p["type"]] += 1
 
-    print(f"{'Area':<32} {'N':>4}  {'Avg Lac':>9}  {'Avg Sqyd':>9}  Type split")
+    # in the print loop, replace s['price_sum']/n with the median:
+    med = statistics.median(s["prices"])
+    print(f"{area:<32} {n:>4}  {med:>9.0f}  {s['sqyd_sum']/n:>9.1f}  {split}")
+
     print("-" * 105)
     for area in sorted(stats, key=lambda a: stats[a]["count"], reverse=True):
         s = stats[area]
