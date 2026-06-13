@@ -3,7 +3,7 @@ import os
 import json
 import re
 from dotenv import load_dotenv
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
@@ -14,6 +14,88 @@ from rental_yield import estimate_rent
 
 load_dotenv()
 
+AMENITY_SYNONYMS = {
+    "Nearby Schools":                  ["school", "schools", "education", "study ke liye", "bachon ka school"],
+    "Nearby Shopping Malls":           ["market", "markets", "mall", "malls", "shopping", "bazaar", "bazar"],
+    "Nearby Hospitals":                ["hospital", "hospitals", "clinic", "medical nearby", "doctor"],
+    "Nearby Restaurants":              ["restaurant", "restaurants", "food", "dining", "khane"],
+    "Nearby Public Transport Service": ["transport", "bus", "metro", "public transport", "commute"],
+    "Security Staff":                  ["security", "guard", "secure", "mehfooz", "safe area", "safety"],
+    "CCTV Security":                   ["cctv", "cameras", "surveillance"],
+    "Maintenance Staff":               ["maintenance", "upkeep", "maintained"],
+    "Community Gym":                   ["gym", "fitness", "workout"],
+    "Swimming Pool":                   ["pool", "swimming"],
+    "Kids Play Area":                  ["play area", "kids area", "playground", "bachon ke liye"],
+    "Community Lawn or Garden":        ["lawn", "garden", "green", "park", "outdoor space"],
+    "Mosque":                          ["mosque", "masjid", "namaz"],
+    "Parking Spaces":                  ["parking", "car park", "garage"],
+    "Electricity Backup":              ["backup", "generator", "load shedding", "ups", "bijli backup"],
+    "Central Air Conditioning":        ["central ac", "central air", "air conditioning"],
+    "Servant Quarter":                 ["servant", "maid room", "quarter"],
+    "Drawing Room":                    ["drawing room", "guest room", "baithak"],
+    "Community Centre":                ["community centre", "community center", "clubhouse"],
+}
+_FAMILY_TRIGGERS = ["family", "ghar wale", "bachon", "kids", "children", "parents"]
+_FAMILY_BEDROOM_FLOOR = 3
+
+def map_to_canonical_amenities(query, extracted_features):
+    haystack = query.lower()
+    if extracted_features:
+        haystack += " " + " ".join(str(f).lower() for f in extracted_features)
+    return [c for c, trigs in AMENITY_SYNONYMS.items() if any(t in haystack for t in trigs)]
+
+def _amenity_match_count(doc_metadata, wanted):
+    if not wanted:
+        return 0
+    raw = doc_metadata.get("amenities", "[]")
+    try:
+        have = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception:
+        have = []
+    have_set = set(have)
+    return sum(1 for w in wanted if w in have_set)
+
+# Tunable: weight of each amenity match vs semantic distance. Range 0.08–0.18.
+PER_AMENITY_WEIGHT = 0.12
+BED_FLOOR_BONUS = 0.08
+
+def _rerank_by_amenities(results, filters):
+    wanted = filters.get("amenities_wanted") or []
+    bed_floor = filters.get("bedrooms_floor")
+    if not results or (not wanted and not bed_floor):
+        return results
+    scores = [s for _, s in results]
+    best, worst = min(scores), max(scores)
+    span = (worst - best) or 1.0
+    def blended(item):
+        doc, score = item
+        norm = (score - best) / span
+        bonus = _amenity_match_count(doc.metadata, wanted) * PER_AMENITY_WEIGHT
+        if bed_floor and (doc.metadata.get("bedrooms") or 0) >= bed_floor:
+            bonus += BED_FLOOR_BONUS
+        return norm - bonus
+    return sorted(results, key=blended)
+
+def _amenity_gap_summary(matched_listings, filters):
+    """Returns (requested, satisfied, missing) canonical amenity lists based on
+    the top visible results. 'satisfied' = wanted amenities present in AT LEAST
+    one of the top results; 'missing' = wanted amenities present in NONE."""
+    wanted = filters.get("amenities_wanted") or []
+    if not wanted or not matched_listings:
+        return wanted, [], []
+    top = matched_listings[:GRID_VISIBLE_COUNT]
+    present = set()
+    for l in top:
+        raw = l["metadata"].get("amenities", "[]")
+        try:
+            have = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            have = []
+        present.update(have)
+    satisfied = [w for w in wanted if w in present]
+    missing = [w for w in wanted if w not in present]
+    return wanted, satisfied, missing
+
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 vectorstore = Chroma(
@@ -21,12 +103,12 @@ vectorstore = Chroma(
     embedding_function=embeddings
 )
 
-llm = ChatGroq(
-    # model="llama-3.3-70b-versatile",
-    model="llama-3.1-8b-instant",
-    api_key=os.getenv("GROQ_API_KEY"),
-    temperature=0.7
-)
+# llm = ChatGroq(
+#     # model="llama-3.3-70b-versatile",
+#     model="llama-3.1-8b-instant",
+#     api_key=os.getenv("GROQ_API_KEY"),
+#     temperature=0.7
+# )
 
 llm_fast = ChatGroq(
     # model="llama-3.3-70b-versatile",
@@ -35,11 +117,11 @@ llm_fast = ChatGroq(
     temperature=0.1  # low temp for structured decisions
 )
 
-# llm = ChatOpenAI(
-#     model="gpt-5.4-mini",
-#     api_key=os.getenv("OPENAI_API_KEY"),
-#     temperature=0.7
-# )
+llm = ChatOpenAI(
+    model="gpt-5.4-mini",
+    api_key=os.getenv("OPENAI_API_KEY"),
+    temperature=0.7
+)
 
 # llm_fast = ChatOpenAI(
 #     model="gpt-5.4-mini",
@@ -93,18 +175,34 @@ Return ONLY a valid JSON object with these possible keys (omit any not mentioned
 - bedrooms (integer)
 - min_bathrooms (integer)
 - max_price (string, in Pakistani format e.g. "2 crore 50 lac")
-- features (array of strings)
+- features (array of strings) — any amenity, lifestyle, or quality wants (e.g. "security", "schools nearby", "family-friendly", "parking")
 
 Return only raw JSON. No explanation. No markdown. No backticks."""
     response = llm_fast.invoke([HumanMessage(content=prompt)])
+    filters = {}
     try:
         raw = response.content.strip()
         # strip markdown fences if present
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
-        return json.loads(raw)
+        filters = json.loads(raw)
     except:
-        return {}
+        pass
+    # Normalise plural type names the LLM sometimes returns ("houses" → "house")
+    _TYPE_NORMALISE = {
+        "houses": "house", "apartments": "apartment", "flats": "apartment",
+        "flat": "apartment", "portions": "upper portion",
+        "penthouses": "penthouse", "farmhouses": "farmhouse",
+    }
+    if filters.get("types"):
+        filters["types"] = [_TYPE_NORMALISE.get(t.lower(), t.lower()) for t in filters["types"]]
+
+    canonical = map_to_canonical_amenities(query, filters.get("features"))
+    if canonical:
+        filters["amenities_wanted"] = canonical
+    if filters.get("bedrooms") is None and any(t in query.lower() for t in _FAMILY_TRIGGERS):
+        filters["bedrooms_floor"] = _FAMILY_BEDROOM_FLOOR
+    return filters
 
 _REVERSE_MORTGAGE_PATTERNS = [
     r"\b\d+(?:\.\d+)?\s*(?:lakh|lac|crore)\s*(?:mein|main|me)\s*(?:kya|kia)\b",
@@ -304,6 +402,7 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
                         merged.append((doc, score))
                 except StopIteration:
                     exhausted[i] = True
+        merged = _rerank_by_amenities(merged, filters)
         return merged[:k]
 
     try:
@@ -321,6 +420,19 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
         if filtered:
             results = filtered
 
+    results = _rerank_by_amenities(results, filters)
+    if not filters.get("locations"):
+        area_count: dict = {}
+        diverse, leftovers = [], []
+        for item in results:
+            area = item[0].metadata.get("location", "").split(",")[0]
+            c = area_count.get(area, 0)
+            if c < 2:
+                area_count[area] = c + 1
+                diverse.append(item)
+            else:
+                leftovers.append(item)
+        results = diverse + leftovers
     return results[:k]
 
 def fetch_cheaper(locations: list, max_price_lacs: int, prev_filters: dict, k: int = 10) -> list:
@@ -358,7 +470,7 @@ def fetch_cheaper(locations: list, max_price_lacs: int, prev_filters: dict, k: i
 
 GRID_VISIBLE_COUNT = 10  # must match frontend renderCards(listings.slice(0, N))
 
-def _results_to_listings(results: list) -> tuple:
+def _results_to_listings(results: list, filters: dict = None) -> tuple:
     """
     Returns (matched_listings, context).
     context only covers the first GRID_VISIBLE_COUNT results so the LLM
@@ -373,6 +485,7 @@ def _results_to_listings(results: list) -> tuple:
     best = min(scores)
     worst = max(scores)
     span = worst - best
+    filters = filters or {}
     for i, (doc, score) in enumerate(raw):
         if i < GRID_VISIBLE_COUNT:
             context += f"\n---\n{doc.page_content}\n"
@@ -383,7 +496,48 @@ def _results_to_listings(results: list) -> tuple:
             location=meta.get("location", ""),
             property_type=meta.get("type", "house"),
         )
-        matched_listings.append({"metadata": meta, "score": round(norm), "rental_yield": rent})
+
+        # Build honest match_reason from actual filter criteria
+        match_parts = []
+        if filters.get("bedrooms") and meta.get("bedrooms") == filters["bedrooms"]:
+            match_parts.append(f"{filters['bedrooms']} bed")
+        if filters.get("max_price"):
+            max_lacs = price_to_lacs(str(filters["max_price"]))
+            if max_lacs > 0 and int(meta.get("price_numeric") or 0) <= max_lacs:
+                match_parts.append(f"within {filters['max_price']} budget")
+        if filters.get("amenities_wanted"):
+            raw_am = meta.get("amenities", "[]")
+            try:
+                have_am = json.loads(raw_am) if isinstance(raw_am, str) else (raw_am or [])
+            except Exception:
+                have_am = []
+            matched_am = [a for a in filters["amenities_wanted"] if a in have_am]
+            if matched_am:
+                match_parts.append(", ".join(matched_am[:2]))
+        if filters.get("locations"):
+            loc_lower = filters["locations"][0].lower()
+            prop_loc = meta.get("location", "")
+            if loc_lower in prop_loc.lower():
+                match_parts.append(prop_loc.split(",")[0])
+
+        if match_parts:
+            match_reason = "Matches: " + ", ".join(match_parts)
+        else:
+            facts = []
+            if meta.get("area_sqyd"):
+                facts.append(f"{meta['area_sqyd']} sq yd")
+            if meta.get("bedrooms"):
+                facts.append(f"{meta['bedrooms']} bed")
+            raw_am = meta.get("amenities", "[]")
+            try:
+                have_am = json.loads(raw_am) if isinstance(raw_am, str) else (raw_am or [])
+            except Exception:
+                have_am = []
+            if have_am:
+                facts.append(have_am[0])
+            match_reason = "Closest match" + (f" — {', '.join(facts)}" if facts else "")
+
+        matched_listings.append({"metadata": meta, "score": round(norm), "rental_yield": rent, "match_reason": match_reason})
     return matched_listings, context
 
 def decide_actions(
@@ -488,8 +642,9 @@ def _handle_mortgage_intent(intent: str, user_id: str, query: str, search_histor
             filters = {"max_price": lacs_to_price(max_lacs)}
             search_results = search_properties(query, filters)
             search_results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
-            matched_listings, context = _results_to_listings(search_results)
+            matched_listings, context = _results_to_listings(search_results, filters)
             result["listings"] = matched_listings
+            result["meta"]["new_results"] = True
             topic = f"budget ≤ {lacs_to_price(max_lacs)}"
             search_history.append({
                 "topic": topic,
@@ -653,7 +808,7 @@ Budget: {budget_str}. Match language of: "{user_query}" (Urdu or English). Conve
         "filters": filters,
         "follow_up": None,
         "actions": [{"id": "new_search", "label": "🔍 New search"}],
-        "meta": {"no_results": False, "action": "investment"},
+        "meta": {"no_results": False, "action": "investment", "new_results": True},
     }
 
 
@@ -713,7 +868,9 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
     context = ""
     filters = {}
     action_label = None
+    highlight_id = None
     classification_type = "NEWSEARCH"
+    requested_am, satisfied_am, missing_am = [], [], []
 
     # Handle numeric shortcuts (4=cheaper, 5=larger, 6=contact)
     if stripped in ("4", "5", "6") and search_history:
@@ -732,7 +889,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
                 filters = {k: v for k, v in prev_filters.items()}
                 filters["max_price"] = lacs_to_price(max_price_lacs)
                 results = fetch_cheaper(locations, max_price_lacs, prev_filters, k=10)
-                matched_listings, context = _results_to_listings(results)
+                matched_listings, context = _results_to_listings(results, filters)
                 search_history.append({"topic": f"cheaper · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
                 user_query = "show cheaper property options"
             else:
@@ -748,8 +905,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             filters["bedrooms"] = new_beds
             loc_str = " ".join(locations) if locations else "properties"
             results = search_properties(f"{new_beds} bed {loc_str}", filters, k=10)
-            results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
-            matched_listings, context = _results_to_listings(results)
+            matched_listings, context = _results_to_listings(results, filters)
             search_history.append({"topic": f"larger · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
             user_query = f"show {new_beds} bedroom properties"
 
@@ -810,8 +966,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             filters["bedrooms"] = new_beds
             loc_str = " ".join(locations) if locations else "properties"
             results = search_properties(f"{new_beds} bed {loc_str}", filters, k=10)
-            results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
-            matched_listings, context = _results_to_listings(results)
+            matched_listings, context = _results_to_listings(results, filters)
             search_history.append({"topic": f"larger · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
             user_query = f"show {new_beds} bedroom properties"
 
@@ -830,7 +985,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
                 filters = {k: v for k, v in prev_filters.items()}
                 filters["max_price"] = lacs_to_price(max_price_lacs)
                 results = fetch_cheaper(locations, max_price_lacs, prev_filters, k=10)
-                matched_listings, context = _results_to_listings(results)
+                matched_listings, context = _results_to_listings(results, filters)
                 search_history.append({"topic": f"cheaper · {last['topic']}", "listings": matched_listings, "context": context, "filters": filters})
                 user_query = "show cheaper property options"
             else:
@@ -849,6 +1004,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
                 if 0 <= selected < len(matched_listings):
                     matched_listings = [matched_listings[selected]]
                     context = matched_listings[0]["metadata"].get("description", context)
+                    highlight_id = matched_listings[0]["metadata"].get("id")
 
         # IMAGES
         elif classification_type == "IMAGES" and search_history:
@@ -894,8 +1050,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
         if matched_listings is None:
             filters = extract_filters(user_query)
             results = search_properties(user_query, filters)
-            results.sort(key=lambda x: int(x[0].metadata.get("price_numeric") or 0))
-            matched_listings, context = _results_to_listings(results)
+            matched_listings, context = _results_to_listings(results, filters)
 
             topic_parts = []
             if filters.get("locations"):
@@ -909,13 +1064,15 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             topic = ", ".join(topic_parts) if topic_parts else user_query[:60]
             search_history.append({"topic": topic, "listings": matched_listings, "context": context, "filters": filters})
             print(f">> New search saved as: '{topic}'")
+            requested_am, satisfied_am, missing_am = _amenity_gap_summary(matched_listings, filters)
 
     no_results = len(matched_listings) == 0
 
     # ── CALL 1: Generate conversational response ──
     if channel == "whatsapp" and not no_results:
-        system_prompt = """You are a WhatsApp real estate assistant. Property cards will be sent right after your message — do NOT list or describe any properties.
-Write ONE warm, natural sentence introducing the results. Examples: "Great news, found some solid options! 👇" or "Here's what we have for you 🏠"
+        _wa_missing = f" If none of the results have {', '.join(missing_am)}, append a brief honest clause like '; none have {', '.join(missing_am)}'." if missing_am else ""
+        system_prompt = f"""You are a WhatsApp real estate assistant. Property cards will be sent right after your message — do NOT list or describe any properties.
+Write ONE warm, natural sentence introducing the results. Examples: "Great news, found some solid options! 👇" or "Here's what we have for you 🏠"{_wa_missing}
 Match the user's language (Urdu or English). One sentence only."""
     elif no_results:
         system_prompt = """You are a helpful real estate assistant. No properties were found.
@@ -934,10 +1091,11 @@ Rules:
 - NEVER repeat back criteria the user already stated in their query — they know what they searched for
 - Instead, ADD information they couldn't already know: standout amenities, size (sq yd), what makes it worth considering, value vs other options, notable features (sea view, gated community, pool, etc.)
 - If the query already specifies location + type + bedrooms, skip restating those — lead with price and then a differentiating detail
-- Reference the best 1-2 options using their location and price (e.g. "the 2 crore house in DHA Phase 5")
+- Describe ONE property only — the FIRST property in the Available properties list below. Lead with it. Do not mention other options.
 - NEVER reference any property by ID number — not from current results and not from conversation history
 - Never invent details not in the 'Available properties' section below
 - Match the user's language (Urdu or English)
+- If the user asked for specific amenities and some are NOT available in any shown property, briefly and honestly acknowledge this in ONE short clause after presenting the best option (e.g. "though none have on-site security"). Never pretend a missing amenity is present. If all requested amenities are covered across the results, don't mention amenities at all.
 
 User's query (treat this as already-known context — do NOT repeat it back): "{user_query}" """
 
@@ -948,6 +1106,7 @@ User query: {user_query}
 
 {"No matching properties found." if no_results else f"Available properties:{context}"}
 
+{f"User requested amenities: {requested_am or 'none'}. Available in results: {satisfied_am or 'none'}. NOT available in any result: {missing_am or 'none'}." if not no_results else ""}
 {"Tell the user nothing matched and suggest what to try." if no_results else "Answer naturally based on the available properties above."}"""
 
     response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
@@ -976,5 +1135,8 @@ User query: {user_query}
         "meta": {
             "no_results": no_results,
             "action": action_label,
+            "top_pick_id": matched_listings[0]["metadata"]["id"] if matched_listings else None,
+            "new_results": classification_type in ("NEWSEARCH", "CHEAPER", "LARGER"),
+            "highlight_id": highlight_id,
         }
     }

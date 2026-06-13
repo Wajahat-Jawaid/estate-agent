@@ -2,7 +2,7 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from rental_yield import estimate_rent
 

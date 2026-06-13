@@ -1489,6 +1489,7 @@
   let allListings = [];
   let currentFilters = {};
   let selectedListingId = null;
+  let topPickId = null;
 
   // ── FILTER BAR ──────────────────────────────────────────────
 
@@ -1773,7 +1774,7 @@
         </div>
         <div class="hero-match-row">
           <span class="hero-match-pct">${score}% Match</span>
-          <span class="hero-match-reason">${matchDesc(score, m)}</span>
+          <span class="hero-match-reason">${listing.match_reason || matchDesc(score, m)}</span>
           <div class="hero-match-track">
             <div class="hero-match-fill" style="width: ${Math.min(score, 100)}%"></div>
           </div>
@@ -1826,15 +1827,12 @@
 
       const imgUrl = images[0] || '';
 
-      const ry = listing.rental_yield;
-      const yieldLine = ry
-        ? `<div class="grid-yield">💰 Est. rent: PKR ${ry.monthly_rent_low.toLocaleString()}–${ry.monthly_rent_high.toLocaleString()}/mo (~${ry.yield_low}–${ry.yield_high}% yield, area est.)</div>`
-        : '';
+      const yieldLine = '';
 
       const card = document.createElement('div');
       card.className = 'grid-card';
       card.dataset.listingId = m.id;
-      if (m.id === selectedListingId) card.classList.add('selected');
+      if (String(m.id) === String(selectedListingId)) card.classList.add('selected');
       card.innerHTML = `
         <div class="grid-img-wrap">
           ${imgUrl ? `<img class="grid-img" src="${imgUrl}" alt="${m.title}" loading="lazy" onerror="this.style.display='none'">` : ''}
@@ -1895,15 +1893,32 @@
         setFilterBarFromAI(data.filters);
       }
 
-      if (data.listings && data.listings.length > 0) {
-        // New search results — clear any prior selection
-        selectedListingId = null;
+      // new_results === true  → explicitly new (repaint)
+      // new_results === false → explicitly old (FOLLOWUP/SMALLTALK, don't repaint)
+      // new_results absent    → old backend / untagged path; repaint if listings present
+      const isNewResults = data.meta && (
+        data.meta.new_results === true ||
+        (data.meta.new_results == null && data.listings && data.listings.length > 0)
+      );
+
+      if (isNewResults) {
+        // Genuinely new result set — repaint the grid and highlight top pick
+        topPickId = (data.meta.top_pick_id != null) ? String(data.meta.top_pick_id) : null;
+        selectedListingId = topPickId;
         updateResults(data.listings);
       } else if (data.meta && data.meta.no_results) {
         selectedListingId = null;
         updateResults([]);
+      } else if (data.meta && data.meta.highlight_id != null) {
+        // Single-property follow-up — move the green highlight, then restore grid
+        // (showSkeletons cleared the DOM; allListings still has the listings in memory)
+        selectedListingId = String(data.meta.highlight_id);
+        updateResults(allListings);
+        const highlighted = document.querySelector(`.grid-card[data-listing-id="${selectedListingId}"]`);
+        if (highlighted) highlighted.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       } else {
-        // Follow-up about existing results — preserve selection
+        // Conversational follow-up (FOLLOWUP text, SMALLTALK, mortgage slot) —
+        // showSkeletons cleared the DOM; restore the existing grid unchanged.
         updateResults(allListings);
       }
 
@@ -2027,7 +2042,7 @@
       (m.bathrooms ? `<span class="pill">${m.bathrooms} bath</span>` : '');
 
     document.getElementById('modalScorePct').textContent = `${score}% Match`;
-    document.getElementById('modalScoreReason').textContent = matchDesc(score, m);
+    document.getElementById('modalScoreReason').textContent = listing.match_reason || matchDesc(score, m);
     document.getElementById('modalScoreFill').style.width = `${Math.min(score, 100)}%`;
 
     const mapUrl = m.map_url || '';

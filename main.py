@@ -117,13 +117,6 @@ def build_property_caption(m: dict, index: int, rental_yield = None) -> str:
     if m.get("map_url"):
         lines.append(f"*Map:* {m['map_url']}")
 
-    if rental_yield:
-        lo  = f"{rental_yield['monthly_rent_low']:,}"
-        hi  = f"{rental_yield['monthly_rent_high']:,}"
-        ylo = rental_yield['yield_low']
-        yhi = rental_yield['yield_high']
-        lines.append(f"💰 Est. rent: PKR {lo}–{hi}/mo (~{ylo}–{yhi}% yield, area est.)")
-
     agent = m.get("agent", "N/A")
     contact = m.get("contact", "")
     agent_str = f"{agent} ({contact})" if contact else agent
