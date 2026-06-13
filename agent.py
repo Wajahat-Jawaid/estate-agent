@@ -96,6 +96,62 @@ def _amenity_gap_summary(matched_listings, filters):
     missing = [w for w in wanted if w not in present]
     return wanted, satisfied, missing
 
+def _results_overview(matched_listings: list) -> str:
+    """Compact aggregate summary across the visible results, for the
+    conversational overview. The LLM grounds its summary in this block so it
+    describes the whole set instead of one property. Empty string if no data."""
+    top = matched_listings[:GRID_VISIBLE_COUNT]
+    if not top:
+        return ""
+
+    prices = [(int(l["metadata"].get("price_numeric") or 0), l) for l in top]
+    prices = [(p, l) for p, l in prices if p > 0]
+    beds = [l["metadata"].get("bedrooms") for l in top if l["metadata"].get("bedrooms")]
+    areas = [(int(l["metadata"].get("area_sqyd") or 0), l) for l in top]
+    areas = [(a, l) for a, l in areas if a > 0]
+
+    # Distinct parent areas, order preserved
+    locs = []
+    for l in top:
+        loc = (l["metadata"].get("location") or "").split(",")[0].strip()
+        if loc and loc not in locs:
+            locs.append(loc)
+
+    # Amenity frequency across the set
+    amen_count = {}
+    for l in top:
+        raw = l["metadata"].get("amenities", "[]")
+        try:
+            have = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            have = []
+        for a in have:
+            amen_count[a] = amen_count.get(a, 0) + 1
+
+    def _title(l):
+        return (l["metadata"].get("title") or "property").title()
+
+    lines = [f"Total results shown: {len(top)}"]
+    if prices:
+        lo = min(prices, key=lambda x: x[0])
+        hi = max(prices, key=lambda x: x[0])
+        lines.append(f"Price range: {lacs_to_price(lo[0])} to {lacs_to_price(hi[0])}")
+        lines.append(f"Cheapest: {_title(lo[1])} in {lo[1]['metadata'].get('location', '')} at {lacs_to_price(lo[0])}")
+    if beds:
+        lines.append(f"Bedrooms: all {min(beds)} bed" if min(beds) == max(beds) else f"Bedrooms: {min(beds)}-{max(beds)} bed")
+    if areas:
+        big = max(areas, key=lambda x: x[0])
+        lines.append(f"Largest: {_title(big[1])} at {big[0]} sq yd")
+    if locs:
+        lines.append(f"Areas covered: {', '.join(locs[:5])}")
+    best = max(top, key=lambda l: l.get("score", 0))
+    lines.append(f"Best match ({best.get('score')}%): {_title(best)} in {best['metadata'].get('location', '')}")
+    if amen_count:
+        common = [a for a, _ in sorted(amen_count.items(), key=lambda x: -x[1])[:3]]
+        lines.append(f"Common amenities: {', '.join(common)}")
+
+    return "\n".join(lines)
+
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 vectorstore = Chroma(
@@ -132,6 +188,7 @@ llm = ChatOpenAI(
 # Per-user memory and search history
 user_memories = {}
 user_search_histories = {}
+user_pending_queries = {}  # user_id -> {"original_query": str, "filters": dict}
 
 _mortgage_handler = MortgageConversationHandler()
 
@@ -147,14 +204,14 @@ def get_user_search_history(user_id: str) -> list:
 
 def price_to_lacs(price_str: str) -> int:
     price_str = price_str.lower().strip()
-    crore, lac = 0, 0
-    crore_match = re.search(r'(\d+)\s*crore', price_str)
+    crore, lac = 0.0, 0
+    crore_match = re.search(r'(\d+(?:\.\d+)?)\s*crore', price_str)
     lac_match = re.search(r'(\d+)\s*lac', price_str)
     if crore_match:
-        crore = int(crore_match.group(1))
+        crore = float(crore_match.group(1))
     if lac_match:
         lac = int(lac_match.group(1))
-    return (crore * 100) + lac
+    return int(crore * 100) + lac
 
 def lacs_to_price(n: int) -> str:
     c, r = n // 100, n % 100
@@ -165,16 +222,16 @@ def lacs_to_price(n: int) -> str:
     return f"{n} lac"
 
 def extract_filters(query: str) -> dict:
-    prompt = f"""Extract property search filters from this query as JSON. Only include filters explicitly mentioned.
+    prompt = f"""Extract property search filters from this query as JSON. Only include filters EXPLICITLY stated by the user — never infer or guess.
 
 Query: "{query}"
 
 Return ONLY a valid JSON object with these possible keys (omit any not mentioned):
-- locations (array of strings) — list EVERY location mentioned. If multiple locations mentioned (e.g. "DHA or Clifton"), list all. Omit if no location mentioned.
+- locations (array of strings) — ONLY specific Karachi neighbourhoods/areas explicitly named (e.g. DHA, Clifton, Gulshan). Do NOT include "Karachi" itself — it is the city, not a neighbourhood. Do NOT infer areas the user didn't mention.
 - types (array of strings) — list EVERY property type mentioned from: house/apartment/upper portion/lower portion/penthouse/farmhouse. Omit if not mentioned.
 - bedrooms (integer)
 - min_bathrooms (integer)
-- max_price (string, in Pakistani format e.g. "2 crore 50 lac")
+- max_price (string, in Pakistani format e.g. "2 crore 50 lac") — use key "max_price", not "budget"
 - features (array of strings) — any amenity, lifestyle, or quality wants (e.g. "security", "schools nearby", "family-friendly", "parking")
 
 Return only raw JSON. No explanation. No markdown. No backticks."""
@@ -188,6 +245,12 @@ Return only raw JSON. No explanation. No markdown. No backticks."""
         filters = json.loads(raw)
     except:
         pass
+
+    # Normalise any rogue key names the small LLM sometimes uses
+    for alias in ("budget", "price", "max_budget"):
+        if alias in filters and "max_price" not in filters:
+            filters["max_price"] = filters.pop(alias)
+
     # Normalise plural type names the LLM sometimes returns ("houses" → "house")
     _TYPE_NORMALISE = {
         "houses": "house", "apartments": "apartment", "flats": "apartment",
@@ -197,12 +260,51 @@ Return only raw JSON. No explanation. No markdown. No backticks."""
     if filters.get("types"):
         filters["types"] = [_TYPE_NORMALISE.get(t.lower(), t.lower()) for t in filters["types"]]
 
+    # Guard against location hallucination: the small LLM frequently invents
+    # neighbourhoods (DHA, Clifton, Gulshan) the user never typed, which then
+    # pulls in pricey areas and blows past the budget. Keep only locations that
+    # actually appear in the query text, and never the city ("Karachi") itself.
+    if filters.get("locations"):
+        q_low = query.lower()
+        kept = [loc for loc in filters["locations"]
+                if isinstance(loc, str)
+                and loc.lower() != "karachi"
+                and loc.lower() in q_low]
+        if kept:
+            filters["locations"] = kept
+        else:
+            filters.pop("locations", None)
+
     canonical = map_to_canonical_amenities(query, filters.get("features"))
     if canonical:
         filters["amenities_wanted"] = canonical
     if filters.get("bedrooms") is None and any(t in query.lower() for t in _FAMILY_TRIGGERS):
         filters["bedrooms_floor"] = _FAMILY_BEDROOM_FLOOR
     return filters
+
+# Phrases that back-reference the budget/area the user already stated, instead of
+# repeating the figure. When one of these appears and the current message did not
+# extract its own budget, we inherit the previous search's budget rather than
+# silently dropping the ceiling (which surfaced wildly over-budget results).
+_BUDGET_CONTINUITY_KW = (
+    "within the budget", "within budget", "in the budget", "in budget",
+    "same budget", "same price", "budget mein", "budget me", "budget main",
+    "usi budget", "isi budget", "us budget", "if within",
+)
+
+def _filters_to_query(filters: dict, fallback: str = "property") -> str:
+    """Build a semantic-search query string from structured filters, used when the
+    raw user message is too terse to search on (e.g. a REFINE like '2 bed is better')."""
+    parts = []
+    if filters.get("bedrooms"):
+        parts.append(f"{filters['bedrooms']} bed")
+    for t in (filters.get("types") or []):
+        parts.append(str(t))
+    for loc in (filters.get("locations") or []):
+        parts.append(str(loc))
+    for am in (filters.get("amenities_wanted") or []):
+        parts.append(str(am))
+    return " ".join(parts).strip() or fallback
 
 _REVERSE_MORTGAGE_PATTERNS = [
     r"\b\d+(?:\.\d+)?\s*(?:lakh|lac|crore)\s*(?:mein|main|me)\s*(?:kya|kia)\b",
@@ -292,7 +394,15 @@ FOLLOWUP — asking about details of already shown properties, comparing shown p
 
 CHEAPER — wants cheaper/more affordable/lower price options than what was shown
 
-LARGER — wants bigger/larger/more rooms than what was shown
+LARGER — wants vaguely bigger/larger/more rooms than what was shown ("bigger ones", "something larger"), WITHOUT naming an exact bedroom count
+
+REFINE — user is adjusting the CURRENT search by adding or changing a CONCRETE constraint (an exact bedroom number, a property type, an amenity) while keeping the rest of what they already told you — especially their budget and area. Use this (NOT NEWSEARCH) when they give a specific new criterion but do NOT name a new location or a new budget figure. Use this (NOT CHEAPER/LARGER) when they name an exact bedroom count or type rather than a vague "cheaper"/"bigger".
+  ✓ "2 bed would be better, within the budget" (keep budget + area, set bedrooms=2)
+  ✓ "make it a house instead" (keep budget + area, change type to house)
+  ✓ "ones with a pool" (keep everything, add the amenity)
+  ✗ "show me places in DHA" → NEWSEARCH (names a new location)
+  ✗ "budget 2 crore now" → NEWSEARCH (states a new budget figure)
+  ✗ "cheaper ones" / "bigger ones" → CHEAPER / LARGER
 
 IMAGES — wants to see photos/pictures/images of a property already shown. May reference a property number (e.g. "images of property 2", "show me photos of the first one")
 
@@ -315,6 +425,7 @@ Return ONLY valid JSON with no explanation:
 {{"type": "FOLLOWUP", "index": 0, "property_num": null}}
 {{"type": "CHEAPER", "index": 0, "property_num": null}}
 {{"type": "LARGER", "index": 0, "property_num": null}}
+{{"type": "REFINE", "index": 0, "property_num": null}}
 {{"type": "SMALLTALK", "index": null, "property_num": null}}
 {{"type": "IMAGES", "index": 0, "property_num": 2}}
 {{"type": "MORTGAGE_EXPLICIT", "index": null, "property_num": null}}
@@ -353,10 +464,9 @@ def build_chroma_filter(filters: dict):
         elif len(valid_types) > 1:
             conditions.append({"type": {"$in": valid_types}})
 
-    if filters.get("max_price") is not None:
-        max_lacs = price_to_lacs(str(filters["max_price"]))
-        if max_lacs > 0:
-            conditions.append({"price_numeric": {"$lte": max_lacs}})
+    # Price range intentionally NOT applied here — Chroma's HNSW ANN stops early
+    # when range filters reject most nearby vectors, returning far too few results.
+    # Price filtering is done in Python after retrieval instead.
 
     if not conditions:
         return None
@@ -367,7 +477,7 @@ def build_chroma_filter(filters: dict):
 def search_properties(query: str, filters: dict, k: int = 10) -> list:
     chroma_filter = build_chroma_filter(filters)
     locations = filters.get("locations") or []
-    fetch_k = max(k * 4, 40)
+    fetch_k = max(k * 10, 100)
 
     if len(locations) > 1:
         per_loc = []
@@ -379,10 +489,14 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
             except:
                 res = vectorstore.similarity_search_with_score(q, k=fetch_k)
 
-            loc_matches = sorted(
-                [(doc, score) for doc, score in res if loc_lower in doc.metadata.get("location", "").lower()],
-                key=lambda x: x[1]
-            )
+            loc_matches = [(doc, score) for doc, score in res if loc_lower in doc.metadata.get("location", "").lower()]
+            if filters.get("max_price"):
+                max_lacs = price_to_lacs(str(filters["max_price"]))
+                if max_lacs > 0:
+                    price_ok = [(d, s) for d, s in loc_matches if int(d.metadata.get("price_numeric") or 0) <= max_lacs]
+                    if price_ok:
+                        loc_matches = price_ok
+            loc_matches = sorted(loc_matches, key=lambda x: x[1])
             per_loc.append(loc_matches)
             print(f">> {loc}: {len(loc_matches)} candidates")
 
@@ -403,29 +517,44 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
                 except StopIteration:
                     exhausted[i] = True
         merged = _rerank_by_amenities(merged, filters)
-        return merged[:k]
+        results = merged
+        # fall through to shared price-proximity sort below
 
-    try:
-        results = vectorstore.similarity_search_with_score(query, k=fetch_k, filter=chroma_filter) if chroma_filter else vectorstore.similarity_search_with_score(query, k=fetch_k)
-    except Exception as e:
-        print(f"Filter failed, falling back: {e}")
-        results = vectorstore.similarity_search_with_score(query, k=fetch_k)
+    else:
+        try:
+            results = vectorstore.similarity_search_with_score(query, k=fetch_k, filter=chroma_filter) if chroma_filter else vectorstore.similarity_search_with_score(query, k=fetch_k)
+        except Exception as e:
+            print(f"Filter failed, falling back: {e}")
+            results = vectorstore.similarity_search_with_score(query, k=fetch_k)
 
-    if not results and chroma_filter:
-        results = vectorstore.similarity_search_with_score(query, k=fetch_k)
+        if not results and chroma_filter:
+            results = vectorstore.similarity_search_with_score(query, k=fetch_k)
 
-    if locations:
-        loc_lower = locations[0].lower()
-        filtered = [(doc, score) for doc, score in results if loc_lower in doc.metadata.get("location", "").lower()]
-        if filtered:
-            results = filtered
+        # Python-side price filter (reliable; Chroma range filters break HNSW retrieval)
+        if filters.get("max_price"):
+            max_lacs = price_to_lacs(str(filters["max_price"]))
+            if max_lacs > 0:
+                price_filtered = [(d, s) for d, s in results if int(d.metadata.get("price_numeric") or 0) <= max_lacs]
+                if price_filtered:
+                    results = price_filtered
 
-    results = _rerank_by_amenities(results, filters)
+        if locations:
+            loc_lower = locations[0].lower()
+            filtered = [(doc, score) for doc, score in results if loc_lower in doc.metadata.get("location", "").lower()]
+            if filtered:
+                results = filtered
+
+        results = _rerank_by_amenities(results, filters)
     if not filters.get("locations"):
+        def _parent_area(location: str) -> str:
+            area = location.split(",")[0].strip()
+            # "DHA Phase 1", "DHA Phase 5", "North Nazimabad Block B" → parent brand
+            return re.sub(r'\s+(?:phase|block|sector|extension|scheme)\s+\S+.*$', '', area, flags=re.IGNORECASE).strip()
+
         area_count: dict = {}
         diverse, leftovers = [], []
         for item in results:
-            area = item[0].metadata.get("location", "").split(",")[0]
+            area = _parent_area(item[0].metadata.get("location", ""))
             c = area_count.get(area, 0)
             if c < 2:
                 area_count[area] = c + 1
@@ -433,6 +562,34 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
             else:
                 leftovers.append(item)
         results = diverse + leftovers
+
+    # Price-proximity sort: regex on the raw query is the most reliable signal —
+    # handles "around X", "1.5 crore", etc. regardless of what the LLM extracted.
+    q_lower = query.lower()
+    crore_m = re.search(r'(\d+(?:\.\d+)?)\s*crore', q_lower)
+    lac_m = re.search(r'(\d+)\s*lac', q_lower)
+    target_lacs = (int(float(crore_m.group(1)) * 100) if crore_m else 0) + (int(lac_m.group(1)) if lac_m else 0)
+    # Fall back to extracted filter if regex found nothing
+    if target_lacs == 0 and filters.get("max_price"):
+        target_lacs = price_to_lacs(str(filters["max_price"]))
+
+    print(f">> Price sort: target={target_lacs} lacs, candidates={len(results)}, prices={sorted(set(int(d.metadata.get('price_numeric') or 0) for d,_ in results))[:10]}")
+
+    if target_lacs > 0:
+        results = sorted(results, key=lambda x: abs(int(x[0].metadata.get("price_numeric") or 0) - target_lacs))
+        print(f">> After sort top-5 prices: {[int(d.metadata.get('price_numeric',0)) for d,_ in results[:5]]}")
+
+    # Hard budget ceiling — the single guarantee that no wildly over-budget
+    # property is ever returned. The per-path filters above keep over-budget
+    # items as a "show something" fallback when an area has nothing in range;
+    # that leak ends here. No fallback: if nothing fits, return empty and let
+    # the no-results path suggest a higher budget or different area.
+    if filters.get("max_price"):
+        ceil = price_to_lacs(str(filters["max_price"]))
+        if ceil > 0:
+            ceil = int(ceil * 1.1)  # small grace for "around X" budgets
+            results = [(d, s) for d, s in results if int(d.metadata.get("price_numeric") or 0) <= ceil]
+
     return results[:k]
 
 def fetch_cheaper(locations: list, max_price_lacs: int, prev_filters: dict, k: int = 10) -> list:
@@ -547,12 +704,14 @@ def decide_actions(
     filters: dict,
     search_history: list,
     channel: str,
-    history_text: str
+    history_text: str,
+    open_dims_hint: str = ""
 ) -> dict:
     """
     Second LLM call — decides the follow-up message and contextual actions.
     Returns: {"follow_up": str|null, "actions": [{"id": str, "label": str}]}
     """
+    is_overview = classification_type in ("NEWSEARCH", "CHEAPER", "LARGER")
     no_results = len(matched_listings) == 0
     prices = [int(l["metadata"].get("price_numeric") or 0) for l in matched_listings if l["metadata"].get("price_numeric")]
     min_price = min(prices) if prices else 0
@@ -573,6 +732,7 @@ Context:
 - Bedrooms shown: {bedrooms_shown}
 - Locations: {locations}
 - Channel: {channel}
+- Dimensions the user has NOT pinned down yet: {open_dims_hint or "unknown"}
 - Conversation: {history_text[-200:] if history_text else "none"}
 
 Available action IDs and when to use them:
@@ -587,8 +747,9 @@ Rules:
 - If SMALLTALK or greeting: return empty actions and null follow_up
 - If no results: offer increase_budget and/or different_area only
 - If results found: offer relevant actions only (max {max_actions})
-- The follow_up message should be warm, contextual, and natural — not generic
-- Never say "Anything else I can help with?" — be specific to context
+- The follow_up MUST be ONE specific, contextual question that moves the user forward — never generic. NEVER "Anything else I can help with?" or "What matters most: price, size, or location?".
+- For a fresh result set ({"this is a fresh set" if is_overview else "NOT a fresh set"}): target a dimension the user hasn't pinned down yet (see "Dimensions the user has NOT pinned down yet" above). Pick the most useful one or two and ask concretely, e.g. "Want me to narrow these by area, or by how many bedrooms you need?".
+- For a single property the user drilled into: ask something specific to it — offer to line it up against a cheaper option, pull the agent's contact, or show more photos.
 - Match the language style of the conversation (Urdu/English)
 
 Return ONLY valid JSON:
@@ -812,6 +973,40 @@ Budget: {budget_str}. Match language of: "{user_query}" (Urdu or English). Conve
     }
 
 
+def _needs_clarification(filters: dict) -> bool:
+    """True when the query is too vague to yield useful results — no location AND no budget."""
+    return not filters.get("locations") and not filters.get("max_price")
+
+
+def _generate_clarifying_question(query: str, filters: dict, history_text: str) -> str:
+    has_beds = filters.get("bedrooms")
+    has_type = filters.get("types")
+
+    known_parts = []
+    if has_beds:
+        known_parts.append(f"{has_beds} bedroom{'s' if has_beds > 1 else ''}")
+    if has_type:
+        known_parts.append(", ".join(has_type))
+    known_str = " ".join(known_parts) if known_parts else ""
+
+    prompt = f"""You are a friendly real estate assistant for Karachi, Pakistan.
+The user is looking for a property. Here's what they said: "{query}"
+{f"You already know they want: {known_str}" if known_str else "You don't have specific property details yet."}
+You still need: their preferred area/location in Karachi, and their budget.
+
+Ask for BOTH the area and budget in ONE natural, warm question — like a knowledgeable friend would ask.
+- If you already know some details (beds, type), acknowledge them briefly before asking
+- Ask for both area and budget together, not separately
+- Be concise — 1-2 sentences max
+- Match the user's language (Urdu or English)
+- Don't use bullet points or lists in the question
+
+Return ONLY the question, nothing else."""
+
+    response = llm_fast.invoke([HumanMessage(content=prompt)])
+    return response.content.strip()
+
+
 def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
     memory = get_user_memory(user_id)
     search_history = get_user_search_history(user_id)
@@ -826,6 +1021,15 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
         memory.chat_memory.add_user_message(user_query)
         memory.chat_memory.add_ai_message(slot_result["response"])
         return slot_result
+
+    # ── Pending clarification: merge stored query with user's answer ──
+    already_clarified = False
+    if user_id in user_pending_queries:
+        pending = user_pending_queries.pop(user_id)
+        original = pending["original_query"]
+        user_query = f"{original}. {user_query}"
+        already_clarified = True
+        print(f">> Merged pending query: {user_query!r}")
 
     # ── Investment intent pre-detection (keyword, no LLM) ──
     # Must run BEFORE mortgage regex so "invest 1 crore" never hits REVERSE_MORTGAGE.
@@ -847,6 +1051,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
     quick_check = llm_fast.invoke([HumanMessage(content=f"""Is this a greeting or small talk unrelated to property search?
     Message: "{user_query}"
     Reply with only: SMALLTALK or PROPERTY""")])
+    print(f">> Quick check: {quick_check.content.strip()!r}")
     if quick_check.content.strip().upper() == "SMALLTALK":
         response = llm.invoke([
             SystemMessage(content="You are a friendly real estate assistant. Respond warmly to greetings, then ask what property they're looking for. Max 2 sentences. Match the user's language."),
@@ -1046,9 +1251,72 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             else:
                 matched_listings = []
 
+        # REFINE — adjust the current search, inheriting every dimension the user
+        # didn't change (budget + area especially). This is what stops a follow-up
+        # like "2 bed would be better, within the budget" from dropping the budget.
+        elif classification_type == "REFINE" and search_history:
+            idx = min(classification.get("index") or len(search_history) - 1, len(search_history) - 1)
+            last = search_history[idx]
+            prev_filters = last.get("filters", {})
+            new_filters = extract_filters(user_query)
+            # New explicit values win; everything else (budget, area, type) carries over.
+            filters = {**prev_filters, **new_filters}
+            print(f">> REFINE merge: prev={prev_filters}, new={new_filters}, merged={filters}")
+            search_query = _filters_to_query(filters, fallback=user_query)
+            results = search_properties(search_query, filters)
+            matched_listings, context = _results_to_listings(results, filters)
+            topic_parts = []
+            if filters.get("locations"):
+                topic_parts.append(" / ".join(filters["locations"]))
+            if filters.get("types"):
+                topic_parts.append("/".join(filters["types"]))
+            if filters.get("bedrooms"):
+                topic_parts.append(f"{filters['bedrooms']} bed")
+            if filters.get("max_price"):
+                topic_parts.append(f"under {filters['max_price']}")
+            topic = ", ".join(topic_parts) if topic_parts else user_query[:60]
+            search_history.append({"topic": topic, "listings": matched_listings, "context": context, "filters": filters})
+            requested_am, satisfied_am, missing_am = _amenity_gap_summary(matched_listings, filters)
+            # Treat as a fresh result set downstream: overview copy + grid repaint.
+            classification_type = "NEWSEARCH"
+
         # NEWSEARCH
         if matched_listings is None:
             filters = extract_filters(user_query)
+            print(f">> Extracted filters: {filters}")
+
+            # Budget-continuity safety net: if the classifier mislabelled a refinement
+            # as NEWSEARCH, the user references their existing budget ("within the
+            # budget") but states no figure, inherit it from the last search so the
+            # ceiling isn't silently dropped.
+            if not filters.get("max_price") and search_history:
+                q_low = user_query.lower()
+                if any(kw in q_low for kw in _BUDGET_CONTINUITY_KW):
+                    prev_budget = search_history[-1].get("filters", {}).get("max_price")
+                    if prev_budget:
+                        filters["max_price"] = prev_budget
+                        if not filters.get("locations"):
+                            prev_locs = search_history[-1].get("filters", {}).get("locations")
+                            if prev_locs:
+                                filters["locations"] = prev_locs
+                        print(f">> Inherited budget from previous search: {prev_budget}")
+
+            # ── Clarification gate: ask once only — skip if already asked ──
+            if not already_clarified and _needs_clarification(filters):
+                clarifying_q = _generate_clarifying_question(user_query, filters, history_text)
+                user_pending_queries[user_id] = {"original_query": user_query, "filters": filters}
+                print(f">> Asking clarification for user {user_id!r}: {clarifying_q!r}")
+                memory.chat_memory.add_user_message(user_query)
+                memory.chat_memory.add_ai_message(clarifying_q)
+                return {
+                    "response": clarifying_q,
+                    "listings": [],
+                    "filters": filters,
+                    "follow_up": None,
+                    "actions": [],
+                    "meta": {"no_results": False, "action": "clarifying"},
+                }
+
             results = search_properties(user_query, filters)
             matched_listings, context = _results_to_listings(results, filters)
 
@@ -1068,12 +1336,39 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
 
     no_results = len(matched_listings) == 0
 
+    # New result sets get an overview of the whole grid; FOLLOWUP / single-pick
+    # responses still describe the one property the user landed on.
+    is_overview = classification_type in ("NEWSEARCH", "CHEAPER", "LARGER")
+    overview = "" if no_results else _results_overview(matched_listings)
+    # CHEAPER / LARGER carry over the amenity filter but skip the NEWSEARCH gap calc
+    if is_overview and not no_results and not requested_am and filters.get("amenities_wanted"):
+        requested_am, satisfied_am, missing_am = _amenity_gap_summary(matched_listings, filters)
+
+    # Which search dimensions has the user NOT pinned down yet? These power a
+    # genuinely contextual closing question instead of a generic "what matters most".
+    _open_dims = []
+    if not filters.get("locations"):
+        _open_dims.append("area/neighbourhood")
+    if not filters.get("bedrooms") and not filters.get("bedrooms_floor"):
+        _open_dims.append("bedroom count")
+    if not filters.get("types"):
+        _open_dims.append("property type (house vs apartment vs portion)")
+    if not filters.get("max_price"):
+        _open_dims.append("budget")
+    open_dims_hint = ", ".join(_open_dims) if _open_dims else "none — they've specified area, beds, type and budget"
+
+    # Conversation depth — the opening overview should stay tight; once the user
+    # has engaged and we're narrowing, a fuller advisory answer is welcome.
+    is_opening = len(search_history) <= 1
+
     # ── CALL 1: Generate conversational response ──
     if channel == "whatsapp" and not no_results:
-        _wa_missing = f" If none of the results have {', '.join(missing_am)}, append a brief honest clause like '; none have {', '.join(missing_am)}'." if missing_am else ""
-        system_prompt = f"""You are a WhatsApp real estate assistant. Property cards will be sent right after your message — do NOT list or describe any properties.
-Write ONE warm, natural sentence introducing the results. Examples: "Great news, found some solid options! 👇" or "Here's what we have for you 🏠"{_wa_missing}
-Match the user's language (Urdu or English). One sentence only."""
+        _wa_missing = f" If no result has {', '.join(missing_am)}, add a brief honest clause like '— none have {', '.join(missing_am)}'." if missing_am else ""
+        system_prompt = f"""You are a sharp, friendly real estate advisor on WhatsApp — not a search engine. Property cards are sent right after your message, so do NOT list individual properties or repeat their price, beds, or size — the cards carry those.
+Write a warm, advisory overview in 2-3 short sentences:
+- First, frame the set: how many options were found and their price range, with a light human touch on the main areas (e.g. "budget-friendly areas like New Karachi and Landhi") rather than a flat list.
+- Then give a small, honest POINT OF VIEW — a gentle recommendation with the reasoning, grounded in what the user has and hasn't told you (e.g. "rather than the cheapest 1-bed, the 2-bed is worth a look first for real family space within the same budget"). When you name a property, write its title EXACTLY as it appears in the overview, never an ID number.{_wa_missing}
+Do NOT end with a question — a follow-up with tappable options is sent separately right after. If more than 5 results were found, mention the top 5 are shown below. Friendly tone, at most one emoji. Only use facts from the "Results overview" below. Match the user's language (Urdu or English)."""
     elif no_results:
         system_prompt = """You are a helpful real estate assistant. No properties were found.
 Rules:
@@ -1082,32 +1377,63 @@ Rules:
 - Never say "I'm sorry", "I apologize", or anything formal
 - Speak like a helpful friend
 - Match the user's language (Urdu or English)"""
+    elif is_overview:
+        if is_opening:
+            length_guidance = """This is the user's FIRST search — keep it SHORT, ~55-70 words total, easy to skim. Write ONE compact 2-sentence body, then the closing question on its own line. Sentence 1: how many options + the price band + a SHORT area characterization (name at most 2-3 areas, or just say "budget-friendly areas" — do NOT list every neighbourhood). Sentence 2: ONE recommendation with a brief why — no second pick, no amenity list. Then the question. If in doubt, cut."""
+        else:
+            length_guidance = """The conversation is already going, so a slightly fuller, more advisory answer is welcome — but still tight. Up to three short paragraphs. You may compare two options if it genuinely helps the user decide."""
+
+        system_prompt = f"""You are a sharp, friendly real estate advisor for Karachi — not a search engine. The user just searched and a grid of property cards is shown beside this chat. Talk like a knowledgeable friend who is helping them think, not a bot reading out a list.
+
+{length_guidance}
+
+Cover these three beats (no headings, no bullets, plain text only) — scale how much you write to the length guidance above:
+
+1) FRAME THE SET: how many options, the price range, and the main areas — with a light human touch on those areas (e.g. "budget-friendly areas like New Karachi and Landhi"). Don't just dump a comma list.
+
+2) GIVE A POINT OF VIEW — this is what makes you useful, not robotic. Don't just name the cheapest and the top match neutrally. Give a small, honest recommendation WITH the reasoning, grounded in what the user has and hasn't told you. Example of the *kind* of judgement (adapt to the actual data, never invent): if they gave a budget but no bedrooms, gently steer toward the choice that's better practical value rather than just the cheapest ("rather than the cheapest 1-bed, the 2-bed in X is worth a look first because it gives real family space within the same budget"). When you name a property, write its title EXACTLY as it appears in the overview so it can be linked, and NEVER use an ID number. Mention a standout amenity only if it genuinely strengthens the pick. If the user asked for an amenity that NO result has, say so honestly in one short clause — never pretend it's there.
+
+3) CLOSE WITH ONE CONTEXTUAL QUESTION (always 1 sentence) — the most important line. This is what makes the chat feel alive. Ask ONE specific, natural follow-up that moves the user forward by targeting something they HAVEN'T pinned down yet. Dimensions still open for this user: {open_dims_hint}. Pick the one or two that matter most and ask about them concretely — e.g. "Want me to narrow these by area, or by how many bedrooms you need?" NEVER ask a generic "what matters most to you: price, size, or location?" or "anything else?" — it must feel like it was written for THIS search.
+
+Hard rules:
+- Never formal, never "I'm sorry"/"I apologize"/"database". No markdown (**bold**, *italics*, backticks).
+- Do NOT restate the user's own criteria back to them as if informing them. Do NOT describe every property or repeat per-card details — the grid shows those.
+- Only use facts from the "Results overview" below — never invent prices, areas, or amenities.
+- Match the user's language (Urdu or English).
+
+User's query (already-known context — do NOT repeat it back): "{user_query}" """
+
     else:
-        system_prompt = f"""You are a helpful real estate assistant. Keep responses SHORT and NATURAL.
+        system_prompt = f"""You are a sharp, friendly real estate advisor for Karachi. Keep it SHORT and NATURAL — talk like a knowledgeable friend, not customer service.
 Rules:
-- Maximum 2 sentences
-- Never say "I'm sorry", "I apologize", "database", or anything formal
-- Speak like a knowledgeable friend, not customer service
-- NEVER repeat back criteria the user already stated in their query — they know what they searched for
-- Instead, ADD information they couldn't already know: standout amenities, size (sq yd), what makes it worth considering, value vs other options, notable features (sea view, gated community, pool, etc.)
-- If the query already specifies location + type + bedrooms, skip restating those — lead with price and then a differentiating detail
-- Describe ONE property only — the FIRST property in the Available properties list below. Lead with it. Do not mention other options.
-- NEVER reference any property by ID number — not from current results and not from conversation history
-- Never invent details not in the 'Available properties' section below
-- Match the user's language (Urdu or English)
-- If the user asked for specific amenities and some are NOT available in any shown property, briefly and honestly acknowledge this in ONE short clause after presenting the best option (e.g. "though none have on-site security"). Never pretend a missing amenity is present. If all requested amenities are covered across the results, don't mention amenities at all.
+- 2-3 short sentences total.
+- Never say "I'm sorry", "I apologize", "database", or anything formal.
+- NEVER repeat back criteria the user already stated — they know what they searched for. Instead ADD what they couldn't already know: standout amenities, size (sq yd), value vs other options, notable features (sea view, gated community, pool, etc.).
+- If the query already specifies location + type + bedrooms, skip restating those — lead with price and then a differentiating detail.
+- Describe ONE property only — the FIRST in the Available properties list. Do not mention other options.
+- End with ONE short, contextual follow-up question that moves them forward — e.g. offer to line it up against a cheaper option, pull the agent's contact, or show more photos. Make it specific to THIS property, never a generic "anything else?".
+- NEVER reference any property by ID number. Never invent details not in 'Available properties' below.
+- If the user asked for specific amenities not available in any shown property, acknowledge it honestly in one short clause (e.g. "though it doesn't have on-site security"). Never pretend a missing amenity is present.
+- Match the user's language (Urdu or English).
 
 User's query (treat this as already-known context — do NOT repeat it back): "{user_query}" """
+
+    if no_results:
+        results_block = "No matching properties found."
+    elif channel == "whatsapp" or is_overview:
+        results_block = f"Results overview:\n{overview}"
+    else:
+        results_block = f"Available properties:{context}"
 
     user_prompt = f"""Conversation history:
 {history_text}
 
 User query: {user_query}
 
-{"No matching properties found." if no_results else f"Available properties:{context}"}
+{results_block}
 
 {f"User requested amenities: {requested_am or 'none'}. Available in results: {satisfied_am or 'none'}. NOT available in any result: {missing_am or 'none'}." if not no_results else ""}
-{"Tell the user nothing matched and suggest what to try." if no_results else "Answer naturally based on the available properties above."}"""
+{"Tell the user nothing matched and suggest what to try." if no_results else "Answer naturally based on the information above."}"""
 
     response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
     ai_response = response.content
@@ -1123,7 +1449,8 @@ User query: {user_query}
         filters=filters,
         search_history=search_history,
         channel=channel,
-        history_text=history_text
+        history_text=history_text,
+        open_dims_hint=open_dims_hint
     )
 
     return {

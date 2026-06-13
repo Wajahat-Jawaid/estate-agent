@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 import httpx
-from agent import get_response, get_user_memory, user_memories, user_search_histories, price_to_lacs, lacs_to_price
+from agent import get_response, get_user_memory, user_memories, user_search_histories, user_pending_queries, price_to_lacs, lacs_to_price
 from mortgage_handler import user_mortgage_states
 
 # ── Persist welcomed users across restarts ──
@@ -273,6 +273,7 @@ async def whatsapp_webhook(request: Request):
                 user_memories.pop(from_number, None)
                 user_search_histories.pop(from_number, None)
                 user_mortgage_states.pop(from_number, None)
+                user_pending_queries.pop(from_number, None)
                 async with httpx.AsyncClient() as client:
                     await client.post(META_URL, headers=WA_HEADERS,
                                       json=wa_text(from_number, "All cleared! What property are you looking for? 🏠"))
@@ -414,6 +415,7 @@ def reset():
     user_memories.clear()
     user_search_histories.clear()
     user_mortgage_states.clear()
+    user_pending_queries.clear()
     return {"status": "reset"}
 
 @app.get("/health")

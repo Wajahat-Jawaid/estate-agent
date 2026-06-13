@@ -372,7 +372,7 @@ AGENT_NAMES = [
     "Ali Raza", "Sara Khan", "Farah Naz", "Bilal Ahmed", "Usman Tariq",
     "Ayesha Siddiqui", "Hassan Malik", "Zainab Fatima", "Imran Sheikh",
     "Maryam Iqbal", "Faisal Qureshi", "Nida Aslam", "Kamran Baig",
-    "Hira Mansoor", "Tariq Jameel", "Saad Rauf", "Mehwish Ali", "Owais Khan",
+    "Hira Mansoor", "Tariq Hussain", "Saad Rauf", "Mehwish Ali", "Owais Khan",
 ]
 IMAGE_SEEDS = [
     "luxury", "interior", "outdoor", "realestate", "building", "modern",
