@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 import httpx
-from agent import get_response, get_user_memory, user_memories, user_search_histories, user_pending_queries, price_to_lacs, lacs_to_price
+from agent import get_response, get_user_memory, user_memories, user_search_histories, user_pending_queries, user_discovery_states, price_to_lacs, lacs_to_price
 from mortgage_handler import user_mortgage_states
 
 # ── Persist welcomed users across restarts ──
@@ -171,6 +171,11 @@ def chat(request: MessageRequest):
     result = get_response(request.message, user_id=request.session_id, channel="web")
     return {
         "response": result["response"],
+        "stage": result.get("stage", "results"),
+        "discovery_complete": result.get("discovery_complete", True),
+        "match_count": result.get("match_count"),
+        "accumulated_filters": result.get("accumulated_filters", result.get("filters", {})),
+        "next_question": result.get("next_question"),
         "listings": result["listings"],
         "filters": result["filters"],
         "follow_up": result.get("follow_up"),
@@ -251,6 +256,7 @@ async def whatsapp_webhook(request: Request):
                 user_memories.pop(from_number, None)
                 user_search_histories.pop(from_number, None)
                 user_mortgage_states.pop(from_number, None)
+                user_discovery_states.pop(from_number, None)
                 async with httpx.AsyncClient() as client:
                     await client.post(META_URL, headers=WA_HEADERS,
                                       json=wa_text(from_number, "All cleared! What property are you looking for? 🏠"))
@@ -274,6 +280,7 @@ async def whatsapp_webhook(request: Request):
                 user_search_histories.pop(from_number, None)
                 user_mortgage_states.pop(from_number, None)
                 user_pending_queries.pop(from_number, None)
+                user_discovery_states.pop(from_number, None)
                 async with httpx.AsyncClient() as client:
                     await client.post(META_URL, headers=WA_HEADERS,
                                       json=wa_text(from_number, "All cleared! What property are you looking for? 🏠"))
@@ -416,6 +423,7 @@ def reset():
     user_search_histories.clear()
     user_mortgage_states.clear()
     user_pending_queries.clear()
+    user_discovery_states.clear()
     return {"status": "reset"}
 
 @app.get("/health")

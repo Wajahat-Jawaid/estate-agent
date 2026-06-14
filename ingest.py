@@ -25,6 +25,18 @@ def price_to_lacs(price_str: str) -> int:
 
 def listing_to_text(listing):
     amenities = ", ".join(listing.get("amenities", []))
+    floor = listing.get("floor", 0)
+    floor_desc = "ground floor" if floor == 0 else f"floor {floor}"
+    band = listing.get("floor_band", "")
+    total_floors = listing.get("total_floors", "")
+    lift_desc = "yes" if listing.get("has_lift") else "no"
+    west_desc = "yes, west open" if listing.get("west_open") else "no"
+    nearby = [label for key, label in (
+        ("near_hospital", "hospital"), ("near_school", "school"),
+        ("near_park", "park"), ("near_masjid", "masjid/mosque"),
+    ) if listing.get(key)]
+    nearby_desc = ", ".join(nearby) if nearby else "none noted"
+    gated_desc = "yes, gated/secure community" if listing.get("gated_community") else "no"
     return f"""
 Property ID: {listing['id']}
 Title: {listing['title']}
@@ -34,6 +46,12 @@ Bathrooms: {listing['bathrooms']}
 Area: {listing['area_sqyd']} square yards
 Price: {listing['price']}
 Location: {listing['location']}
+Floor: {floor_desc} ({band} floor of {total_floors})
+Lift: {lift_desc}
+West open: {west_desc}
+Possession: {listing.get('possession', 'ready')}
+Nearby amenities: {nearby_desc}
+Gated community: {gated_desc}
 Amenities: {amenities}
 Agent: {listing['agent']}
 Contact: {listing['contact']}
@@ -62,8 +80,22 @@ metadatas = [
         "images": json.dumps(l.get("images", [])),
         "bathrooms": l.get("bathrooms", 0),
         "area_sqyd": l.get("area_sqyd", 0),
+        "area_sqft": l.get("area_sqft", 0),
         "map_url": l.get("map_url", ""),
         "amenities": json.dumps(l.get("amenities", [])),
+        # Discovery inference fields (added Phase 0) — scalar so Chroma can filter on them
+        "floor": l.get("floor", 0),
+        "near_hospital": bool(l.get("near_hospital", False)),
+        "near_school": bool(l.get("near_school", False)),
+        "near_park": bool(l.get("near_park", False)),
+        "near_masjid": bool(l.get("near_masjid", False)),
+        "gated_community": bool(l.get("gated_community", False)),
+        # Data enrichment round 2 (for deep family discovery)
+        "total_floors": l.get("total_floors", 0),
+        "floor_band": l.get("floor_band", ""),
+        "has_lift": bool(l.get("has_lift", False)),
+        "west_open": bool(l.get("west_open", False)),
+        "possession": l.get("possession", "ready"),
     }
     for l in listings
 ]
