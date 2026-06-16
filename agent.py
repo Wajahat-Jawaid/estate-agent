@@ -14,19 +14,18 @@ from rental_yield import estimate_rent
 
 load_dotenv()
 
+# PHYSICAL in-property amenities ONLY. Proximity/"nearby" concepts (school,
+# hospital, park, masjid, market, restaurant, transport) are deliberately NOT here
+# — they are a conceptually separate dimension handled by the near_* scalar flags
+# (see _SITUATIONAL_RULES / _SOFT_SIT_BONUS), not matched against the amenities array.
 AMENITY_SYNONYMS = {
-    "Nearby Schools":                  ["school", "schools", "education", "study ke liye", "bachon ka school"],
-    "Nearby Shopping Malls":           ["market", "markets", "mall", "malls", "shopping", "bazaar", "bazar"],
-    "Nearby Hospitals":                ["hospital", "hospitals", "clinic", "medical nearby", "doctor"],
-    "Nearby Restaurants":              ["restaurant", "restaurants", "food", "dining", "khane"],
-    "Nearby Public Transport Service": ["transport", "bus", "metro", "public transport", "commute"],
     "Security Staff":                  ["security", "guard", "secure", "mehfooz", "safe area", "safety"],
     "CCTV Security":                   ["cctv", "cameras", "surveillance"],
     "Maintenance Staff":               ["maintenance", "upkeep", "maintained"],
     "Community Gym":                   ["gym", "fitness", "workout"],
     "Swimming Pool":                   ["pool", "swimming"],
     "Kids Play Area":                  ["play area", "kids area", "playground", "bachon ke liye"],
-    "Community Lawn or Garden":        ["lawn", "garden", "green", "park", "outdoor space"],
+    "Community Lawn or Garden":        ["lawn", "garden", "green", "outdoor space"],
     "Mosque":                          ["mosque", "masjid", "namaz"],
     "Parking Spaces":                  ["parking", "car park", "garage"],
     "Electricity Backup":              ["backup", "generator", "load shedding", "ups", "bijli backup"],
@@ -64,7 +63,8 @@ BED_FLOOR_BONUS = 0.08
 # floor_band, has_lift — stay hard filters in build_chroma_filter.)
 _SOFT_SIT_BONUS = {
     "near_hospital": 0.06, "near_school": 0.06, "near_park": 0.05,
-    "near_masjid": 0.05, "gated_community": 0.06, "west_open": 0.06,
+    "near_masjid": 0.05, "near_market": 0.05, "near_restaurant": 0.04,
+    "near_transport": 0.05, "gated_community": 0.06, "west_open": 0.06,
 }
 
 def _rerank_by_amenities(results, filters):
@@ -245,6 +245,27 @@ def _parse_budget_ceiling(query: str) -> str | None:
         return lacs_to_price(int(max(crores) * 100))
     if lacs:
         return lacs_to_price(max(lacs))
+    return None
+
+def _parse_budget_floor(query: str) -> str | None:
+    """Lower budget bound — for band answers ("between 5 and 7 crore") and floors
+    ("above 7 crore", "minimum 1.5 crore"). Returns the lower bound as a price
+    string, or None when the message has no floor sense."""
+    q = query.lower()
+    # Explicit floor: "above/over/more than/minimum/at least/starting X crore|lac"
+    m = re.search(r'(?:above|over|more than|minimum|at\s*least|starting)\s*(?:rs\.?\s*)?'
+                  r'(\d+(?:\.\d+)?)\s*(crore|lac)', q)
+    if m:
+        n = float(m.group(1))
+        return lacs_to_price(int(n * 100) if m.group(2) == 'crore' else int(n))
+    # Range "X to Y crore" / "between X and Y crore" → lower bound
+    if any(w in q for w in (" to ", " and ", "between", "-")):
+        crores = [float(x) for x in re.findall(r'(\d+(?:\.\d+)?)\s*crore', q)]
+        lacs = [int(x) for x in re.findall(r'(\d+)\s*lac', q)]
+        if len(crores) >= 2:
+            return lacs_to_price(int(min(crores) * 100))
+        if len(lacs) >= 2:
+            return lacs_to_price(min(lacs))
     return None
 
 def extract_filters(query: str) -> dict:
@@ -650,6 +671,11 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
         if ceil > 0:
             ceil = int(ceil * 1.1)  # small grace for "around X" budgets
             results = [(d, s) for d, s in results if int(d.metadata.get("price_numeric") or 0) <= ceil]
+    if filters.get("min_price"):
+        floor = price_to_lacs(str(filters["min_price"]))
+        if floor > 0:
+            floor = int(floor * 0.9)  # small grace below the band floor
+            results = [(d, s) for d, s in results if int(d.metadata.get("price_numeric") or 0) >= floor]
 
     # Hard minimum bedrooms ("at least 4", "2 or 3 bed") — python-filtered here
     # rather than in the Chroma where-clause, since range filters break HNSW.
@@ -1109,12 +1135,21 @@ _SITUATIONAL_RULES = [
      {"gated_community": True}),
     (("hospital", "clinic", "medical", "doctor"),
      {"near_hospital": True}),
-    (("park", "garden", "jogging", "playground"),
+    (("school", "schools", "education", "bachon ka school", "study ke liye"),
+     {"near_school": True}),
+    (("park", "jogging", "playground"),
      {"near_park": True}),
+    (("market", "markets", "mall", "malls", "shopping", "bazaar", "bazar", "grocery"),
+     {"near_market": True}),
+    (("restaurant", "restaurants", "dining", "eatery", "food street", "khane"),
+     {"near_restaurant": True}),
+    (("public transport", "bus", "metro", "commute", "transport"),
+     {"near_transport": True}),
 ]
 
 _SITUATIONAL_FIELDS = ("floor", "near_hospital", "near_school", "near_park",
-                       "near_masjid", "gated_community")
+                       "near_masjid", "near_market", "near_restaurant",
+                       "near_transport", "gated_community")
 
 # Deterministic "this is clearly about property" signal. Used to bypass the
 # unreliable small-talk LLM gate: a message with any of these is treated as a
@@ -1141,6 +1176,37 @@ _TYPE_WORDS = ("flat", "apartment", "house", "portion", "penthouse", "farmhouse"
 def _mentions_type(query: str) -> bool:
     ql = query.lower()
     return any(w in ql for w in _TYPE_WORDS)
+
+
+# Surface word → canonical type present in the data (house, apartment, penthouse,
+# upper/lower portion). "portion" is handled separately since it's two words.
+_TYPE_SURFACE = {
+    "apartment": "apartment", "apartments": "apartment", "flat": "apartment", "flats": "apartment",
+    "house": "house", "houses": "house", "bungalow": "house", "bungalows": "house",
+    "villa": "house", "villas": "house", "kothi": "house", "makan": "house", "makaan": "house",
+    "penthouse": "penthouse", "penthouses": "penthouse",
+    "farmhouse": "farmhouse", "farmhouses": "farmhouse",
+}
+
+def _match_types(query: str) -> list:
+    """Deterministic property-type capture. The small extraction LLM routinely
+    returns {} even for a plain "apartment"/"house" answer, so — exactly like areas
+    and bedrooms — we parse types ourselves and treat the result as authoritative
+    when the message names one. Returns canonical types in mention order."""
+    ql = " " + query.lower() + " "
+    found = []
+    if re.search(r'\bportions?\b', ql):  # "upper/lower portion" — else both
+        up, lo = bool(re.search(r'\bupper\b', ql)), bool(re.search(r'\blower\b', ql))
+        if up:
+            found.append("upper portion")
+        if lo:
+            found.append("lower portion")
+        if not up and not lo:
+            found += ["upper portion", "lower portion"]
+    for word, canon in _TYPE_SURFACE.items():
+        if re.search(r'\b' + re.escape(word) + r'\b', ql):
+            found.append(canon)
+    return list(dict.fromkeys(found))
 
 
 # Roman-Urdu markers — used to pick the reply language from the *sentence*, not a
@@ -1179,7 +1245,9 @@ _FLOOR_PREF_RULES = [
     (("top floor", "topmost", "upper most", "sabse upar", "highest floor"),
      {"floor_band": "top"}),
 ]
-_LIFT_KW = ("lift", "elevator")
+# Word-boundary match — a bare substring test set has_lift on "C-lift-on"
+# (Clifton), silently forcing a lift requirement whenever the area was mentioned.
+_LIFT_RE = re.compile(r'\b(?:lift|elevator)\b', re.IGNORECASE)
 _WEST_OPEN_KW = ("west open", "west-open", "west khula", "westopen")
 
 def infer_floor_pref(query: str) -> dict:
@@ -1188,7 +1256,7 @@ def infer_floor_pref(query: str) -> dict:
     for triggers, fields in _FLOOR_PREF_RULES:
         if any(t in q for t in triggers):
             out.update(fields)
-    if any(t in q for t in _LIFT_KW):
+    if _LIFT_RE.search(query):
         out["has_lift"] = True
     return out
 
@@ -1254,6 +1322,62 @@ def infer_possession(query: str) -> dict:
     if any(k in q for k in _READY_POSSESSION_KW):
         return {"possession": "ready"}
     return {}
+
+
+# Soft, additive LLM catch-all. The keyword rules above are deterministic but blind to
+# the long tail ("my wife is pregnant", "my father uses a wheelchair", "we host guests
+# often"). This pass reasons over the message and returns ONLY soft hint fields — every
+# key here is a rerank signal (see _SOFT_SIT_BONUS / BED_FLOOR_BONUS), NEVER a hard
+# filter. It deliberately CANNOT emit budget, an exact bedroom count, a location, or a
+# property type — those stay with the deterministic parsers — so it can never resurface
+# the over-budget / hallucinated-filter bugs we engineered out. Worst case it adds a
+# slightly-off rerank nudge, which the search already tolerates.
+_SOFT_CATCHALL_BOOLS = ("near_hospital", "near_school", "near_park", "near_masjid",
+                        "near_market", "near_restaurant", "near_transport", "gated_community")
+
+def _infer_situation_and_ack(user_query: str, lang: str = "English") -> tuple:
+    """ONE LLM call doing two jobs that share the same understanding of the message:
+    (1) the soft situational hints (rerank-only fields), and (2) a short warm
+    acknowledgement of anything personal the buyer shared. Returns (hints_dict,
+    ack_str). The conservative prompt keeps the fast 8B's over-firing at bay (it
+    invented bedrooms_floor/near_* on plain budget answers); the capable model is
+    used. Returns ({}, "") on trivial input, doubt, or any parse failure."""
+    q = (user_query or "").strip()
+    if len(q.split()) < 3:   # trivial / single-tap pill answers need neither pass
+        return {}, ""
+    prompt = f"""A property buyer said: "{user_query}"
+
+Return a JSON object with EXACTLY two keys, "hints" and "ack".
+
+"hints": an object of SOFT situational filters the buyer's words DIRECTLY imply (be conservative — when in doubt, omit). Allowed keys ONLY:
+- "bedrooms_floor": integer — the MINIMUM bedrooms implied by WHO will live there, ONLY when implied without an exact number (couple expecting a baby -> 3; parents + kids living together -> 4). Omit if the message gives no household detail.
+- "near_hospital","near_school","near_park","near_masjid","near_market","near_restaurant","near_transport","gated_community": true — ONLY when that specific need is directly implied (elderly/medical -> near_hospital; school-going kids -> near_school; explicit safety/security -> gated_community; regular prayer/masjid -> near_masjid).
+NEVER include budget, price, an exact requested bedroom count, a location/area, or a property type. A plain budget ("3.5 crore"), a bare area name, or a generic "for my family" with no further detail -> "hints": {{}}.
+
+"ack": a SHORT, warm, natural ONE-sentence acknowledgement of the specific personal or situational thing they shared (a baby on the way, an elderly parent, a safety worry, a firm requirement) — like a thoughtful human agent. NO question, NO budget/price/area names, NO advice or lists. If they shared nothing noteworthy (just a plain answer like a budget figure or an area name), use an empty string "". Write the "ack" ONLY in {lang}.
+
+Output ONLY the JSON object."""
+    try:
+        raw = llm.invoke([HumanMessage(content=prompt)]).content.strip()
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        data = json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        print(f">> _infer_situation_and_ack failed: {e}")
+        return {}, ""
+    hints_in = data.get("hints") if isinstance(data.get("hints"), dict) else {}
+    hints = {}
+    bf = hints_in.get("bedrooms_floor")
+    if isinstance(bf, bool):           # JSON true/false sneaks past int checks
+        bf = None
+    if isinstance(bf, int) and 1 <= bf <= 7:
+        hints["bedrooms_floor"] = bf
+    for k in _SOFT_CATCHALL_BOOLS:
+        if hints_in.get(k) is True:
+            hints[k] = True
+    ack = (data.get("ack") or "").strip().strip('"')
+    if len(ack) > 220 or ack.endswith("?") or ack.endswith("؟"):  # guard padding/questions
+        ack = ""
+    return hints, ack
 
 
 # Deterministic Karachi-area capture — the small LLM frequently drops a bare area
@@ -1409,6 +1533,10 @@ def _count_where(filters: dict):
         ceil = int(price_to_lacs(str(filters["max_price"])) * 1.1)
         if ceil > 0:
             conds.append({"price_numeric": {"$lte": ceil}})
+    if filters.get("min_price"):
+        floor = int(price_to_lacs(str(filters["min_price"])) * 0.9)
+        if floor > 0:
+            conds.append({"price_numeric": {"$gte": floor}})
     # near_*/gated/floor==0 are SOFT (handled in _rerank_by_amenities), not hard
     # filters — see _SOFT_SIT_BONUS. Only explicit structural prefs are hard here.
     if filters.get("floor_band"):
@@ -1438,7 +1566,38 @@ def count_matches(filters: dict) -> int:
     return len(metas)
 
 
-def _merge_discovery_filters(state: dict, user_query: str) -> list:
+# "No preference / you decide" answers. For dims where an empty value is a legit
+# answer (area, type, floor, extras, possession, purpose), the buyer saying "open to
+# your suggestions" must RESOLVE the dim — otherwise extraction finds nothing and we
+# keep re-asking the same question until the ask-limit runs out.
+_NO_PREF_PATTERNS = (
+    "open to suggestion", "open to your suggestion", "your suggestion", "you suggest",
+    "you decide", "up to you", "whatever you", "no preference", "doesn't matter",
+    "does not matter", "doesnt matter", "any area", "anywhere", "any is fine",
+    "anything is fine", "anything works", "no specific", "not specific", "i'm open",
+    "im open", "i am open", "you choose", "you pick", "as you suggest", "as you see fit",
+    # roman urdu
+    "koi bhi", "aap batao", "aap bata", "aap suggest", "jo aap", "aap decide",
+    "koi preference nahi", "koi khaas nahi", "aap k hisab", "aap ke hisab",
+)
+
+def _is_no_preference(query: str) -> bool:
+    q = " " + (query or "").lower() + " "
+    return any(p in q for p in _NO_PREF_PATTERNS)
+
+# dim → the filter keys that, once set, mean the buyer DID give a concrete value
+# (so a no-preference phrase shouldn't override it).
+_DIM_VALUE_KEYS = {
+    "area": ("locations",),
+    "type": ("types",),
+    "floor": ("floor_band", "has_lift"),
+    "extras": ("features",),
+    "possession": ("possession",),
+    "purpose": ("purpose",),
+}
+
+
+def _merge_discovery_filters(state: dict, user_query: str, lang: str = "English") -> list:
     """Extract + infer from the user's message, merge into accumulated state.
     Walk-back: if the newly inferred situational filters zero out the result
     set, drop them (keeping explicit ones) and report which were relaxed."""
@@ -1449,7 +1608,13 @@ def _merge_discovery_filters(state: dict, user_query: str) -> list:
     # Drop hallucinated types: extract_filters sometimes returns every property type
     # for a message that never mentions one (e.g. a floor-preference turn). Only
     # trust extracted types when the message actually names a type.
-    if explicit.get("types") and not _mentions_type(user_query):
+    # Deterministic type capture is AUTHORITATIVE (the small LLM often returns {} for
+    # a bare "apartment"). Fall back to the LLM's types only if our matcher finds none
+    # and the message actually names a type.
+    matched_types = _match_types(user_query)
+    if matched_types:
+        explicit["types"] = matched_types
+    elif explicit.get("types") and not _mentions_type(user_query):
         explicit.pop("types")
     # Deterministic area capture. When our matcher finds areas it is AUTHORITATIVE
     # (it's rejection-aware), overriding the LLM's locations for this turn — the LLM
@@ -1467,9 +1632,20 @@ def _merge_discovery_filters(state: dict, user_query: str) -> list:
     # (a budget on a turn that mentioned no money; "8 people" → 2 beds), and a stray
     # value would clobber the correct accumulated one. Implicit beds still come from
     # household inference below.
-    det_budget = _parse_budget_ceiling(user_query)
-    if det_budget:
-        explicit["max_price"] = det_budget
+    ql = user_query.lower()
+    det_ceiling = _parse_budget_ceiling(user_query)
+    det_floor = _parse_budget_floor(user_query)
+    # "above/over X" with no upper bound is a FLOOR, not a ceiling — the ceiling
+    # parser would otherwise misread the same number as a max.
+    floor_only = (det_floor is not None
+                  and bool(re.search(r'\b(?:above|over|more than|minimum|at\s*least|starting)\b', ql))
+                  and not any(w in ql for w in (" to ", "between", "-")))
+    if det_floor:
+        explicit["min_price"] = det_floor
+    if floor_only:
+        explicit.pop("max_price", None)
+    elif det_ceiling:
+        explicit["max_price"] = det_ceiling
     else:
         explicit.pop("max_price", None)
     explicit.pop("bedrooms", None)
@@ -1489,6 +1665,17 @@ def _merge_discovery_filters(state: dict, user_query: str) -> list:
     inferred.update(infer_possession(user_query))
     if any(k in (" " + user_query.lower() + " ") for k in _POSSESSION_SIGNAL_KW):
         state["possession_relevant"] = True
+
+    # Soft catch-all + acknowledgement in ONE LLM call (they share the same reading of
+    # the message). Hints fold in additively — bedrooms_floor keeps the HIGHER of rule
+    # vs catch-all (more rooms wins for a soft floor); bools union as True. The ack is
+    # stashed for the wording layer to prepend when this is a templated question turn.
+    soft, ack = _infer_situation_and_ack(user_query, lang)
+    state["_last_soft"] = soft
+    state["_last_ack"] = ack
+    if soft.get("bedrooms_floor") and inferred.get("bedrooms_floor"):
+        soft["bedrooms_floor"] = max(soft["bedrooms_floor"], inferred["bedrooms_floor"])
+    inferred.update(soft)
 
     # Merge into accumulated state. List-valued filters (locations, types,
     # amenities_wanted, features) UNION across turns; scalars are overwritten with
@@ -1517,10 +1704,18 @@ def _merge_discovery_filters(state: dict, user_query: str) -> list:
 
     # Budget fallback: extract_filters misses ranges like "2.2 to 2.6 crore".
     # Capture the upper bound from the raw message so a budget answer is never lost.
-    if not merged.get("max_price"):
+    # Skip on a floor-only turn ("above 7 crore") — there the number is a min, not a max.
+    if not merged.get("max_price") and not floor_only:
         ceiling = _parse_budget_ceiling(user_query)
         if ceiling:
             merged["max_price"] = ceiling
+
+    # Reconcile the band floor: a fresh single-ceiling answer (no range/floor words)
+    # clears an earlier min; a floor-only answer clears an earlier ceiling.
+    if det_ceiling and det_floor is None and not floor_only:
+        merged.pop("min_price", None)
+    if floor_only:
+        merged.pop("max_price", None)
 
     # Walk-back: only the explicit STRUCTURAL prefs (middle floor, lift) are hard
     # filters that can over-narrow; the near_*/gated/floor==0 fields are soft now.
@@ -1546,6 +1741,15 @@ def _merge_discovery_filters(state: dict, user_query: str) -> list:
             relaxed = trial
         merged = relaxed
 
+    # "Open to your suggestions" on the dim we just asked → mark it RESOLVED so we
+    # stop re-asking and move the consultation forward. Only when the buyer gave no
+    # concrete value for that dim this turn (an answer like "Gulshan, or you suggest"
+    # still pins Gulshan and is not treated as no-preference).
+    last_dim = state.get("last_dim")
+    if last_dim in _DIM_VALUE_KEYS and _is_no_preference(user_query):
+        if not any(merged.get(k) for k in _DIM_VALUE_KEYS[last_dim]):
+            state.setdefault("resolved", set()).add(last_dim)
+
     state["filters"] = merged
     return dropped
 
@@ -1553,37 +1757,58 @@ def _merge_discovery_filters(state: dict, user_query: str) -> list:
 MAX_ASK_PER_DIM = 2  # re-ask an unanswered spec dimension at most twice
 
 def _next_discovery_dim(state: dict):
-    """Deterministic, human-shaped order: purpose → budget → bedrooms → area →
-    type → floor/lift → extras → recap. (A measured A/B showed this beats letting
-    an LLM pick the order — it aligns better with how real agents consult and is
-    cheaper + stable.) A dim is skipped once KNOWN; re-asked up to MAX_ASK_PER_DIM
-    if still unknown (extraction is flaky); never reveals half-blind nor loops."""
+    """Deterministic, human-shaped order: purpose → household → type → area/budget
+    opener → budget → possession → area → floor/lift → extras, then reveal (no
+    confirmation step — when the requirements are clear, re-asking "did I get that
+    right?" just wastes a turn). Understanding the HOME (who lives there, house vs
+    apartment) before money/area matches how a real agent consults; when the buyer
+    already stated beds+type up front those are skipped and the area/budget opener
+    leads, which is exactly what we want. (A measured A/B showed a fixed order beats
+    letting an LLM pick — cheaper + stable.) A dim is skipped once KNOWN; re-asked up
+    to MAX_ASK_PER_DIM if still unknown (extraction is flaky); never loops."""
     f = state["filters"]
     asked = state["asked"]
+    resolved = state.get("resolved") or set()  # dims the buyer left to us ("you suggest")
 
     def need(dim, known):
-        return not known and asked.get(dim, 0) < MAX_ASK_PER_DIM
+        return not known and dim not in resolved and asked.get(dim, 0) < MAX_ASK_PER_DIM
 
-    if not f.get("purpose") and asked.get("purpose", 0) < 1:  # opener — ask at most once
+    if not f.get("purpose") and "purpose" not in resolved and asked.get("purpose", 0) < 1:
         return "purpose"
-    if need("budget", f.get("max_price")):
-        return "budget"
-    # Possession is a top concern for overseas / document-cautious buyers — ask it
-    # early (right after budget), the way a real agent does, not buried at the end.
-    if state.get("possession_relevant") and need("possession", f.get("possession")):
-        return "possession"
-    if need("household", f.get("bedrooms") or f.get("bedrooms_floor") or f.get("bedrooms_min")):
+    # Household before money/area. A CONFIRMED bedroom count suppresses it; but a soft
+    # bedrooms_floor (inferred from "two kids, my mother") only counts AFTER we've asked
+    # once — so the buyer gets the question + bedroom pills, yet describing the family
+    # rather than naming a number doesn't loop us (the soft floor still drives the
+    # search). Without this guard household re-asks until its limit and reveals early.
+    household_known = (f.get("bedrooms") or f.get("bedrooms_min")
+                       or (f.get("bedrooms_floor") and asked.get("household", 0) >= 1))
+    if need("household", household_known):
         return "household"
-    if need("area", f.get("locations")):
-        return "area"
     if need("type", f.get("types")):
         return "type"
+    # Smart opener: when we know NEITHER budget NOR area, don't fire a bare "what's
+    # your budget?" — ask the one branching question a real agent asks ("do you have
+    # areas in mind, or should I suggest based on budget?"). It lets the buyer answer
+    # either way and routes the rest of the flow (fixed-area → honest budget check;
+    # no area → budget-first → area suggestions). Asked at most once.
+    budget_known = f.get("max_price") or f.get("min_price")
+    if (not budget_known and not f.get("locations")
+            and "area" not in resolved and asked.get("area_budget", 0) < 1):
+        return "area_budget"
+    # Budget counts as answered with EITHER a ceiling or a floor — a "above X" /
+    # "minimum X" answer sets only min_price, and must not loop the budget question.
+    if need("budget", f.get("max_price") or f.get("min_price")):
+        return "budget"
+    # Possession is a top concern for overseas / document-cautious buyers — ask it
+    # right after budget, the way a real agent does, not buried at the end.
+    if state.get("possession_relevant") and need("possession", f.get("possession")):
+        return "possession"
+    if need("area", f.get("locations")):
+        return "area"
     if need("floor", f.get("floor_band") or f.get("has_lift")):
         return "floor"
-    if asked.get("extras", 0) < 1:
+    if "extras" not in resolved and asked.get("extras", 0) < 1:
         return "extras"
-    if asked.get("recap", 0) < 1:
-        return "recap"
     return None
 
 
@@ -1597,7 +1822,8 @@ _DISCOVERY_DIM_PROMPT = {
     "household": "Ask how many family members will live there and who (kids, parents), so you can judge "
                  "the right number of bedrooms. Warm and brief.",
     "type": "Ask whether they prefer a house, apartment, or portion (and note if they're open to portions).",
-    "budget": "Ask warmly what budget you should keep in mind (they'll answer in lac or crore).",
+    "budget": "Ask warmly what budget you should keep in mind. Just ask their budget plainly — "
+              "NEVER say the words 'lac' or 'crore' (it's understood they'll answer in those).",
     "area": "Ask which area(s) of Karachi they prefer, or whether they're open to your suggestions.",
     "floor": "Ask their floor preference (ground / middle / top) and whether a lift is required — this "
              "matters for elderly family members visiting.",
@@ -1607,33 +1833,6 @@ _DISCOVERY_DIM_PROMPT = {
               "generator/electricity backup, drawing room, west-open, good maintenance, schools nearby. "
               "Ask it naturally, not as a long checklist.",
 }
-
-
-def _discovery_recap(filters: dict, lang: str = "English") -> str:
-    """One-sentence recap of gathered requirements + a 'did I get that right?'."""
-    parts = []
-    if filters.get("bedrooms"):
-        parts.append(f"{filters['bedrooms']} bedrooms")
-    if filters.get("types"):
-        parts.append("/".join(filters["types"]))
-    if filters.get("floor_band"):
-        parts.append(f"{filters['floor_band']} floor")
-    if filters.get("has_lift"):
-        parts.append("lift")
-    if filters.get("max_price"):
-        parts.append(f"budget up to {filters['max_price']}")
-    if filters.get("locations"):
-        parts.append("areas: " + ", ".join(filters["locations"]))
-    if filters.get("possession") == "ready":
-        parts.append("ready possession with clear documents")
-    extras = [str(x) for x in (filters.get("features") or [])]
-    if filters.get("west_open"):
-        extras.append("west open")
-    summary = "; ".join(parts)
-    extra_str = (" Also: " + ", ".join(extras)) if extras else ""
-    prompt = f"""You are a sharp, warm Karachi real-estate advisor. RECAP the buyer's requirements back naturally in ONE flowing sentence to confirm you understood — like a real agent summarising before pulling options — then ask "Did I get that right?". Requirements: {summary}.{extra_str}
-Reply ONLY in {lang}. No markdown, no bullet points. Max 2 sentences. Sound human, not like a checklist read-out."""
-    return llm.invoke([HumanMessage(content=prompt)]).content.strip()
 
 
 # Per-area typical price band, computed from the actual listings (not synthetic),
@@ -1671,9 +1870,15 @@ def _area_price_bands(filters: dict) -> str:
 
 
 def _areas_for_budget(filters: dict, limit: int = 6) -> list:
-    """Data-grounded area suggestions: parent areas that actually have stock
-    matching the buyer's type + bedrooms + budget. Lets the bot advise on areas
-    like a human agent ("in this budget, Gulshan/Johar/Scheme 33 are practical")."""
+    """Parent areas where the buyer's budget is a GOOD FIT for their type + beds,
+    ranked PREMIUM-FIRST — the way a real buyer thinks ("I'd rather a 3.75cr flat in
+    Gulshan than in Malir"). An area is eligible only if it has a real cluster of
+    in-budget stock (depth ≥ 3) AND the budget reaches at least its 25th-percentile
+    price (so the buyer can afford something decent there, not just the dregs). Among
+    eligible areas we rank by overall price level (median for this type+beds), so the
+    more desirable area surfaces first. Note: we deliberately do NOT chase the area
+    where the budget is merely 'typical' — that just surfaces value areas where the
+    budget tops out the local market."""
     conds = []
     types = [t for t in (filters.get("types") or []) if isinstance(t, str)]
     if len(types) == 1:
@@ -1682,23 +1887,255 @@ def _areas_for_budget(filters: dict, limit: int = 6) -> list:
         conds.append({"type": {"$in": types}})
     if filters.get("bedrooms") is not None:
         conds.append({"bedrooms": {"$eq": filters["bedrooms"]}})
-    if filters.get("max_price"):
-        ceil = int(price_to_lacs(str(filters["max_price"])) * 1.1)
-        if ceil > 0:
-            conds.append({"price_numeric": {"$lte": ceil}})
     where = None if not conds else (conds[0] if len(conds) == 1 else {"$and": conds})
     try:
         metas = vectorstore._collection.get(where=where, include=["metadatas"]).get("metadatas", []) or []
     except Exception:
         return []
-    from collections import Counter
+    from collections import Counter, defaultdict
 
     def parent(loc):
         a = loc.split(",")[0].strip()
         return re.sub(r'\s+(?:phase|block|sector|extension|scheme)\s+\S+.*$', '', a, flags=re.IGNORECASE).strip()
 
-    counts = Counter(parent(m.get("location", "")) for m in metas if m.get("location"))
-    return [a for a, _ in counts.most_common(limit) if a]
+    by_area = defaultdict(list)
+    for m in metas:
+        loc, p = m.get("location"), int(m.get("price_numeric") or 0)
+        if loc and p:
+            by_area[parent(loc)].append(p)
+
+    max_lacs = price_to_lacs(str(filters["max_price"])) if filters.get("max_price") else 0
+    min_lacs = price_to_lacs(str(filters["min_price"])) if filters.get("min_price") else 0
+
+    if not max_lacs and not min_lacs:  # no budget yet → fall back to most-stock areas
+        counts = Counter({a: len(ps) for a, ps in by_area.items() if a})
+        return [a for a, _ in counts.most_common(limit)]
+
+    ceil = int(max_lacs * 1.1) if max_lacs else 0
+    floor = int(min_lacs * 0.9) if min_lacs else 0
+    MIN_DEPTH = 3  # need a real cluster of in-budget stock, not one fluke listing
+
+    def _rank(min_depth: int):
+        scored = []
+        for area, prices in by_area.items():
+            if not area:
+                continue
+            ps = sorted(prices)
+            in_budget = [p for p in ps if (not ceil or p <= ceil) and (not floor or p >= floor)]
+            if len(in_budget) < min_depth:
+                continue
+            # Budget must reach at least the area's lower-middle (25th pct), else the
+            # buyer is priced into only the cheapest dregs of a too-premium area. This
+            # drops DHA/Clifton at a mid budget automatically — no tier table needed.
+            p25 = ps[len(ps) // 4]
+            if max_lacs and ceil < p25:
+                continue
+            # Premium-first: rank by the area's overall price level (desirability proxy
+            # for this type+beds), then by how much attainable in-budget stock it has.
+            median = ps[len(ps) // 2]
+            scored.append((-median, -len(in_budget), area))
+        scored.sort()
+        return [a for _, _, a in scored[:limit]]
+
+    # Prefer areas with a real in-budget cluster; if none qualify, relax depth so we
+    # still surface suggestions rather than handing back an empty screen.
+    return _rank(MIN_DEPTH) or _rank(1)
+
+
+# ── Context-grounded discovery pills ────────────────────────────────────────
+# Tappable quick-replies offered alongside a discovery question. They are derived
+# from the ACTUAL matching stock for what the buyer has said so far, so the budget
+# bands start at the real floor price for (area + type + beds), the bedroom chips
+# only show counts that exist, etc. Pills are purely additive — each one just sends
+# the same text a user could type, and free-typing is always accepted.
+
+def _nice_round(n: int, down: bool = False) -> int:
+    """Round a lac amount to a human-friendly boundary (25 lac under 1cr, 50 lac
+    under 10cr, else 1cr)."""
+    if n <= 0:
+        return 0
+    step = 25 if n < 100 else (50 if n < 1000 else 100)
+    return (n // step) * step if down else ((n + step - 1) // step) * step
+
+
+def _matching_metas(filters: dict, drop: tuple = ()):
+    """Listing metadatas matching the accumulated filters, optionally ignoring some
+    keys (drop the dimension we're about to ask about, so its pills span the real
+    available range rather than collapsing to whatever's already pinned)."""
+    f = {k: v for k, v in filters.items() if k not in drop}
+    try:
+        metas = vectorstore._collection.get(where=_count_where(f), include=["metadatas"]).get("metadatas", []) or []
+    except Exception:
+        return []
+    if "locations" not in drop:
+        locs = [l.lower() for l in (filters.get("locations") or []) if isinstance(l, str)]
+        if locs:
+            metas = [m for m in metas if any(loc in (m.get("location", "").lower()) for loc in locs)]
+    return metas
+
+
+def _budget_pills(filters: dict) -> list:
+    metas = _matching_metas(filters, drop=("max_price", "min_price"))
+    prices = sorted(int(m.get("price_numeric") or 0) for m in metas if m.get("price_numeric"))
+    if len(prices) < 6:
+        return []  # too little stock to band meaningfully — let them type
+    q1 = _nice_round(prices[len(prices) // 4])
+    q2 = _nice_round(prices[len(prices) // 2])
+    q3 = _nice_round(prices[(3 * len(prices)) // 4])
+    cuts = sorted({c for c in (q1, q2, q3) if c > 0})
+    if len(cuts) < 2:
+        return []
+    pills = [{"label": f"Under {lacs_to_price(cuts[0])}", "value": f"under {lacs_to_price(cuts[0])}"}]
+    for lo, hi in zip(cuts, cuts[1:]):
+        pills.append({"label": f"{lacs_to_price(lo)} – {lacs_to_price(hi)}",
+                      "value": f"between {lacs_to_price(lo)} and {lacs_to_price(hi)}"})
+    pills.append({"label": f"Above {lacs_to_price(cuts[-1])}", "value": f"above {lacs_to_price(cuts[-1])}"})
+    return pills
+
+
+def _bedroom_pills(filters: dict) -> list:
+    metas = _matching_metas(filters, drop=("bedrooms", "bedrooms_min"))
+    counts = sorted({int(m.get("bedrooms") or 0) for m in metas if m.get("bedrooms")})
+    pills, capped = [], False
+    for c in counts:
+        if c <= 0:
+            continue
+        if c >= 5:
+            if not capped:
+                pills.append({"label": "5+ bed", "value": "5+ bedrooms"})
+                capped = True
+        else:
+            pills.append({"label": f"{c} bed", "value": f"{c} bedrooms"})
+    return pills
+
+
+_TYPE_LABELS = {"house": "House", "apartment": "Apartment", "upper portion": "Upper portion",
+                "lower portion": "Lower portion", "penthouse": "Penthouse", "farmhouse": "Farmhouse"}
+
+def _type_pills(filters: dict) -> list:
+    metas = _matching_metas(filters, drop=("types", "type"))
+    types = sorted({(m.get("type") or "").lower() for m in metas if m.get("type")})
+    return [{"label": _TYPE_LABELS.get(t, t.title()), "value": t} for t in types if t][:6]
+
+
+def _family_areas_for_budget(filters: dict, limit: int = 6) -> list:
+    """Realistic areas to SUGGEST when the buyer has a budget but no area yet, ranked by
+    how much IN-BUDGET stock each area has of the buyer's EXACT size (most options
+    first). Exact-size first is deliberate: suggesting areas off a ±1 bedroom window
+    surfaced nicer names (Johar, North Nazimabad) that then had ZERO exact stock at the
+    buyer's budget, so the reveal contradicted the suggestion. We only widen to the ±1
+    window when the exact slice is too sparse to suggest from (<3 areas), and only then
+    fall back to cheapest areas. No budget yet → most-stock areas."""
+    types = [t for t in (filters.get("types") or []) if isinstance(t, str)]
+    beds = filters.get("bedrooms")
+    max_lacs = price_to_lacs(str(filters["max_price"])) if filters.get("max_price") else 0
+    from collections import defaultdict
+
+    def parent(loc):
+        a = loc.split(",")[0].strip()
+        return re.sub(r'\s+(?:phase|block|sector|extension|scheme)\s+\S+.*$', '', a, flags=re.IGNORECASE).strip()
+
+    def _by_area(lo_b, hi_b):
+        conds = []
+        if len(types) == 1:
+            conds.append({"type": {"$eq": types[0]}})
+        elif len(types) > 1:
+            conds.append({"type": {"$in": types}})
+        if beds:
+            conds.append({"bedrooms": {"$gte": lo_b}})
+            conds.append({"bedrooms": {"$lte": hi_b}})
+        where = None if not conds else (conds[0] if len(conds) == 1 else {"$and": conds})
+        try:
+            metas = vectorstore._collection.get(where=where, include=["metadatas"]).get("metadatas", []) or []
+        except Exception:
+            return {}
+        ba = defaultdict(list)
+        for m in metas:
+            loc, p = m.get("location"), int(m.get("price_numeric") or 0)
+            if loc and p:
+                ba[parent(loc)].append(p)
+        return ba
+
+    def _rank(by_area):
+        if not max_lacs:  # no budget yet → most-stock areas
+            ranked = sorted(((a, ps) for a, ps in by_area.items() if a), key=lambda kv: -len(kv[1]))
+            return [a for a, _ in ranked][:limit]
+        ceil = int(max_lacs * 1.1)
+        scored = []
+        for area, prices in by_area.items():
+            if not area:
+                continue
+            in_budget = [p for p in prices if p <= ceil]
+            if len(in_budget) < 2:  # need a small real cluster, not one fluke
+                continue
+            median = sorted(prices)[len(prices) // 2]
+            scored.append((-len(in_budget), median, area))  # most in-budget stock first
+        scored.sort()
+        return [a for _, _, a in scored[:limit]]
+
+    # Exact size first — what the reveal can actually deliver. Widen only if too sparse.
+    exact = _rank(_by_area(beds, beds)) if beds else _rank(_by_area(None, None))
+    if len(exact) >= 3 or not beds or not max_lacs:
+        if exact:
+            return exact
+    window = _by_area(max(1, beds - 1), beds + 1)
+    out = _rank(window)
+    if out:
+        return out
+    # Budget reaches almost nothing even widened — name the cheapest areas so we still
+    # point them somewhere real rather than handing back nothing.
+    ranked = sorted(((a, ps) for a, ps in window.items() if a), key=lambda kv: sorted(kv[1])[0])
+    return [a for a, _ in ranked][:limit]
+
+
+def _area_pills(filters: dict) -> list:
+    return [{"label": a, "value": a} for a in _family_areas_for_budget(filters, limit=6)]
+
+
+def _floor_pills(filters: dict) -> list:
+    return [
+        {"label": "Ground floor", "value": "ground floor"},
+        {"label": "Middle floor", "value": "middle floor"},
+        {"label": "Top floor", "value": "top floor"},
+        {"label": "No preference", "value": "no floor preference"},
+    ]
+
+
+def _must_have_pills(filters: dict) -> list:
+    """Tappable must-haves for the area-discussion turn — values are phrased so the
+    extractors/inference pick them up (lift→has_lift, the rest→features)."""
+    return [
+        {"label": "Lift", "value": "lift is a must"},
+        {"label": "Parking", "value": "dedicated parking"},
+        {"label": "Backup", "value": "generator backup"},
+        {"label": "Family building", "value": "proper family building"},
+        {"label": "All of these", "value": "lift, parking, backup and a family building are all must-haves"},
+    ]
+
+
+# dim → (builder, is_multi_select). Dims not listed (purpose, possession, extras,
+# recap) get no pills; the user free-types those.
+_DISCOVERY_PILL_BUILDERS = {
+    "budget": (_budget_pills, False),
+    "household": (_bedroom_pills, False),   # the bedrooms question
+    "type": (_type_pills, False),
+    "area": (_area_pills, True),
+    "floor": (_floor_pills, False),
+    "area_intel": (_must_have_pills, True),  # the block-level area discussion turn
+}
+
+def _discovery_options(dim, filters: dict) -> dict:
+    """{"options": [{label, value}...], "multi": bool} for a discovery question."""
+    fn_multi = _DISCOVERY_PILL_BUILDERS.get(dim)
+    if not fn_multi:
+        return {"options": [], "multi": False}
+    fn, multi = fn_multi
+    try:
+        opts = fn(filters or {})
+    except Exception as e:
+        print(f">> _discovery_options({dim}) failed: {e}")
+        opts = []
+    return {"options": opts, "multi": multi}
 
 
 _PREMIUM_AREA_KW = ("dha", "defence", "clifton", "bath island", "khayaban-e")
@@ -1712,8 +2149,12 @@ def _budget_reality_message(filters: dict, lang: str = "English"):
         return None
     if not filters.get("max_price") or not (filters.get("bedrooms") or filters.get("types")):
         return None
-    if count_matches(filters) > 0:
-        return None  # actually feasible — no pushback
+    # Fire when the premium area has essentially nothing for this size at this budget
+    # — zero, or only a token handful that would force real compromises. A budget that
+    # comfortably clears the area (e.g. 6 crore in DHA) has plenty of stock and is left
+    # alone; a tight one (e.g. 3 crore in DHA for a 3-bed) gets the honest heads-up.
+    if count_matches(filters) >= 3:
+        return None  # comfortably feasible — no pushback
     alt = {k: v for k, v in filters.items() if k != "locations"}
     areas = _areas_for_budget(alt, limit=5)
     areas_str = ", ".join(areas) if areas else "areas like PECHS, Gulshan, or Gulistan-e-Johar"
@@ -1725,37 +2166,382 @@ In about 2 natural sentences: honestly but warmly tell them this budget is very 
     return llm.invoke([HumanMessage(content=prompt)]).content.strip()
 
 
-def _widen_discovery_search(filters: dict, search_query: str, target: int = 4):
-    """A real agent shortlists ~4-5 options. Our hard filters (floor/lift/possession
-    + exact bedrooms) often AND down to ~1, so on a discovery reveal, progressively
-    relax the least-essential ones until there are enough options. Never relaxes
-    budget/area/type. Returns (listings, context, relaxed_field_names)."""
-    # Only relax INFERRED/soft structural prefs. NEVER relax explicitly-stated
-    # requirements (possession, bedrooms, budget, area, type) — padding the
-    # shortlist with properties that violate what the buyer insisted on is worse
-    # than showing fewer. (This was surfacing non-possession/wrong-bed options to
-    # the overseas buyer who required ready-possession 3-bed.)
-    relax_order = ["floor_band", "has_lift"]
+def _widen_discovery_search(filters: dict, search_query: str, target: int = 5):
+    """A real agent shortlists ~5 options and NEVER hands back an empty screen.
+    Our hard filters (floor/lift/possession + exact bedrooms + a tight budget in a
+    specific area) often AND down to 0-1, so on a discovery reveal we progressively
+    relax — least-painful first — until there's a proper shortlist:
+
+        1. inferred structural prefs (floor_band, has_lift)  — silent
+        2. exact bedrooms → ±1 window                        — tagged "bedrooms"
+        3. budget ceiling → ~25% over                        — tagged "budget"
+        4. specific area (last resort, only if still empty)  — tagged "area"
+
+    Possession and property *type* are never relaxed (a buyer who said "apartment"
+    does not want a house). Budget/bedroom/area easements TAG each affected listing
+    (`listing["relaxed"]`) so the cards and the reveal copy stay honest about what
+    was stretched. Returns (listings, context, relaxed_field_names)."""
+
+    def _run(f):
+        return _results_to_listings(search_properties(search_query, f), f)
+
+    orig = dict(filters)
     cur = dict(filters)
     relaxed = []
-    results = search_properties(search_query, cur)
-    ml, ctx = _results_to_listings(results, cur)
-    for fld in relax_order:
+    ml, ctx = _run(cur)
+
+    # 1) Inferred structural prefs — relax silently (the buyer never insisted).
+    for fld in ("floor_band", "has_lift"):
         if len(ml) >= target:
             break
         if fld in cur:
             cur = {k: v for k, v in cur.items() if k != fld}
             relaxed.append(fld)
-            results = search_properties(search_query, cur)
-            ml, ctx = _results_to_listings(results, cur)
+            ml, ctx = _run(cur)
+
+    # 2) Exact bedrooms → ±1 (a 3-bed for a wanted-4 is the easiest substitute).
+    if len(ml) < target and cur.get("bedrooms"):
+        want = cur["bedrooms"]
+        trial = {k: v for k, v in cur.items() if k != "bedrooms"}
+        trial["bedrooms_min"] = max(1, want - 1)
+        ml2, ctx2 = _run(trial)
+        ml2 = [l for l in ml2 if abs(int(l["metadata"].get("bedrooms") or 0) - want) <= 1]
+        ml2.sort(key=lambda l: abs(int(l["metadata"].get("bedrooms") or 0) - want))
+        if len(ml2) > len(ml):
+            cur, ml, ctx = trial, ml2, ctx2
+            relaxed.append("bedrooms")
+        for l in ml:
+            if int(l["metadata"].get("bedrooms") or 0) != want:
+                l.setdefault("relaxed", []).append("bedrooms")
+
+    # 3) Budget — show slightly-over options when nothing else fits, clearly tagged.
+    #    Kept modest on purpose: the buyer's AREA is the priority, so we only nudge
+    #    the ceiling a little here and let step 4 (drop area) be the true last resort.
+    #    Effective cap after search_properties' internal 1.1x grace ≈ 1.25x original.
+    if len(ml) < target and orig.get("max_price"):
+        orig_lacs = price_to_lacs(str(orig["max_price"]))
+        if orig_lacs > 0:
+            trial = dict(cur)
+            trial["max_price"] = lacs_to_price(int(orig_lacs * 1.25 / 1.1))
+            ml3, ctx3 = _run(trial)
+            if len(ml3) > len(ml):
+                cur, ml, ctx = trial, ml3, ctx3
+                if "budget" not in relaxed:
+                    relaxed.append("budget")
+            for l in ml:
+                if int(l["metadata"].get("price_numeric") or 0) > orig_lacs:
+                    l.setdefault("relaxed", []).append("budget")
+
+    # 4) Specific area — last resort, only if the area genuinely has nothing.
+    if len(ml) == 0 and cur.get("locations"):
+        trial = {k: v for k, v in cur.items() if k != "locations"}
+        ml4, ctx4 = _run(trial)
+        if ml4:
+            cur, ml, ctx = trial, ml4, ctx4
+            relaxed.append("area")
+            for l in ml:
+                l.setdefault("relaxed", []).append("area")
+
     return ml, ctx, relaxed
 
 
+# Plain, polite, fixed phrasing for each slot question. We use these verbatim when
+# the buyer didn't actually ask anything — the LLM kept smuggling in salesy preamble
+# ("Absolutely — a 3-bed is the sweet spot…") and even the words 'lac/crore' despite
+# being told not to, so for a question this simple we just don't ask the LLM.
+_CANNED_DIM_QUESTION = {
+    "purpose": {"English": "Is this for your own living, or more of an investment?",
+                "Urdu": "Yeh apni rehaish ke liye hai ya investment ke liye?"},
+    "household": {"English": "How many family members will be living there?",
+                  "Urdu": "Ghar mein kitne family members rahenge?"},
+    "type": {"English": "Would you prefer a house, an apartment, or a portion?",
+             "Urdu": "Aap house, apartment ya portion mein se kya pasand karenge?"},
+    "budget": {"English": "What budget should I keep in mind for you?",
+               "Urdu": "Aap ka budget kitna rakhein main aap ke liye?"},
+    "area": {"English": "Do you have an area in mind, or would you like me to suggest a few?",
+             "Urdu": "Koi area zehan mein hai, ya main aap ko kuch tajweez karun?"},
+    "floor": {"English": "Any floor preference — ground, middle, or top? And do you need a lift?",
+              "Urdu": "Floor ki koi preference — ground, middle ya top? Aur lift chahiye?"},
+    "possession": {"English": "Do you need a ready-to-move property with clear documents, or are you open to under-construction?",
+                   "Urdu": "Aap ko ready-to-move property chahiye saaf documents ke sath, ya under-construction bhi chalega?"},
+    "extras": {"English": "Any must-have features — like parking, a generator, or schools nearby?",
+               "Urdu": "Koi zaroori feature — jaise parking, generator, ya qareeb school?"},
+}
+
+# Cues that the buyer ASKED something / raised a concern this turn — in that case we
+# want the LLM to answer them as an expert, not fire back a canned slot question.
+_QUESTION_CUES = (
+    "?", "؟", "kya", "kia", "kaise", "kyun", "kyu", "what", "which", "why", "how",
+    "can ", "could ", "should ", "is it", "are there", "do you", "expensive",
+    "cheaper", "worried", "concern", "but ", "however", "afford",
+)
+
+def _buyer_asked_something(user_query: str) -> bool:
+    q = " " + (user_query or "").lower().strip() + " "
+    return any(cue in q for cue in _QUESTION_CUES)
+
+
+# Budget and area are the "clarity" questions — keep them crisp and plain (the
+# fixed canned line). Every OTHER dimension gets a brief, warm human touch via the
+# LLM below (a few-word acknowledgement + the question), because the bare canned
+# lines ("Any must-have features…") read too robotic on the softer questions.
+_STRAIGHTFORWARD_DIMS = {"budget", "area"}
+
+
+def _is_premium_only(filters: dict) -> bool:
+    locs = [l for l in (filters.get("locations") or []) if isinstance(l, str)]
+    return bool(locs) and all(any(p in l.lower() for p in _PREMIUM_AREA_KW) for l in locs)
+
+
+def _size_phrase(filters: dict, with_family: bool = True) -> str:
+    """e.g. '3-bed family apartment' / '3-bed apartment' / 'apartment'."""
+    beds = filters.get("bedrooms")
+    typ = (filters.get("types") or ["property"])[0]
+    fam = "family " if (with_family and filters.get("purpose") == "living") else ""
+    sizing = f"{beds}-bed " if beds else ""
+    return f"{sizing}{fam}{typ}".strip()
+
+
+def _article(phrase: str) -> str:
+    """'a' / 'an' for the leading sound of a phrase (so we never say 'a apartment')."""
+    return "an" if phrase[:1].lower() in "aeiou" else "a"
+
+
+def _area_budget_opener(filters: dict, lang: str) -> str:
+    """The branching first question — lets the buyer answer with areas OR defer to
+    our suggestion based on budget. Grounded in what they've already told us."""
+    desc = _size_phrase(filters, with_family=False)
+    living = filters.get("purpose") == "living"
+    if lang == "Urdu":
+        p = " rehaish ke liye" if living else ""
+        return (f"Zaroor, main madad kar sakta hoon. Kyunke yeh {desc}{p} hai, area aur "
+                f"budget hi tay karte hain ke kya realistic hai. Aap ke zehan mein koi "
+                f"pasandeeda area hai, ya main aap ke budget ke hisaab se munasib areas suggest karun?")
+    purpose = " for family living" if living else ""
+    return (f"Sure, I can help. Since it's {_article(desc)} {desc}{purpose}, the area and budget really "
+            f"shape what's realistic. Do you already have a preferred area or two in Karachi, "
+            f"or should I suggest suitable areas based on your budget?")
+
+
+def _budget_question(filters: dict, lang: str) -> str:
+    """Context-aware budget ask. A fixed premium area earns an honest 'I'll be straight
+    with you' framing; an open area earns a promise to suggest areas once we know it;
+    otherwise the plain line."""
+    desc = _size_phrase(filters)
+    if _is_premium_only(filters):
+        names = "/".join(filters.get("locations"))
+        if lang == "Urdu":
+            return (f"{names} ke liye aap kitne budget mein comfortable hain? Agar woh ek "
+                    f"proper {desc} ke liye tight hua to main saaf bata dunga.")
+        return (f"For {names}, what budget are you comfortable with? I'll be straight with "
+                f"you if it's tight for a proper {desc} there.")
+    if not filters.get("locations"):
+        if lang == "Urdu":
+            return (f"Aap ka budget kitna rakhun? Pata chalte hi main aap ko ek {desc} ke "
+                    f"liye realistic areas bata dunga.")
+        return (f"What budget should I keep in mind? Once I know that, I can point you to "
+                f"realistic areas for a {desc}.")
+    canned = _CANNED_DIM_QUESTION["budget"]
+    return canned.get(lang, canned["English"])
+
+
+def _area_suggestion_message(filters: dict, lang: str) -> str:
+    """Budget is known but no area yet → warm, positive, routine-first guidance: affirm
+    the budget, name a few genuinely realistic family areas (grounded in our in-budget
+    stock), steer toward routine + building quality over the area name, then ask which
+    side of Karachi suits them. Never name-drops premium areas — that pushback only
+    belongs when the buyer themselves fixed on DHA/Clifton (see _budget_reality_message).
+    Falls back to the plain ask if we can't surface areas at all."""
+    areas = _family_areas_for_budget(filters, limit=5)
+    if not areas:
+        canned = _CANNED_DIM_QUESTION["area"]
+        return canned.get(lang, canned["English"])
+    desc = _size_phrase(filters)                       # e.g. "3-bed family apartment"
+    price = filters.get("max_price") or filters.get("min_price")
+    living = filters.get("purpose") == "living"
+    workable = len(areas) >= 3
+    areas_str = ", ".join(areas[:4])
+    a1 = areas[0]
+    a2 = areas[1] if len(areas) > 1 else None
+
+    if lang == "Urdu":
+        lead = (f"Bohat acha — {price} ek proper {desc} ke liye Karachi mein workable budget hai."
+                if workable else
+                f"{price} is size ke liye thora tight hai, lekin hum phir bhi achi options dekh sakte hain.")
+        routine = (" Sahi choice aap ke daily routine par depend karti hai — office, bachon ka school, "
+                   "family qareeb hona, aur commute." if living else
+                   " Sahi choice aap ki priorities par hai — commute, kiraye ki demand, aur resale.")
+        quality = ("\n\nFamily living ke liye main area ke naam se zyada building ki condition, lift, "
+                   "parking aur backup dekhne ka mashwara dunga." if living else "")
+        sides = f"{a1} side ya {a2} side" if a2 else f"{a1} side"
+        return (f"{lead}\n\nIs range mein achi family options {areas_str} jaise areas mein milti hain."
+                f"{routine}{quality}\n\nAap ke routine ke hisaab se Karachi ka kaunsa side behtar "
+                f"rahega — {sides}, ya main suggest karun?")
+
+    lead = (f"Great — {price} is a workable budget for a proper {desc} in Karachi."
+            if workable else
+            f"{price} is on the tighter side for a {desc}, but we can still find solid options.")
+    routine = (" The best choice really comes down to your daily routine — office, the kids' school, "
+               "family nearby, and commute." if living else
+               " The best choice depends on your priorities — commute, rental demand, and resale.")
+    quality = ("\n\nFor family living I'd weigh building condition, lift, parking and backup more than "
+               "the area name alone." if living else "")
+    sides = f"the {a1} side, the {a2} side" if a2 else f"the {a1} side"
+    return (f"{lead}\n\nIn this range we can look at good family options in areas like {areas_str}."
+            f"{routine}{quality}\n\nWhich side of Karachi suits your routine better — {sides}, or "
+            f"would you like me to suggest?")
+
+
+def _area_blocks(area_label: str, limit: int = 8) -> list:
+    """Real sub-localities (Block 7, Phase 5, Precinct 10…) of a parent area that
+    actually exist in our inventory — so the area-intel discussion only ever names
+    blocks we can fulfil, never an invented one."""
+    al = area_label.split(",")[0].strip().lower()
+    if not al:
+        return []
+    try:
+        metas = vectorstore._collection.get(include=["metadatas"]).get("metadatas", []) or []
+    except Exception:
+        return []
+    from collections import Counter
+    blocks = Counter()
+    for m in metas:
+        loc = m.get("location") or ""
+        if al in loc.lower():
+            mt = re.search(r'\b((?:block|phase|sector|precinct)\s+[\w-]+)', loc, re.IGNORECASE)
+            if mt:
+                blocks[mt.group(1).title()] += 1
+    return [b for b, _ in blocks.most_common(limit)]
+
+
+def _area_intel_fallback(area_disp: str, desc: str, budget: str, blocks: list,
+                         living: bool, exact_count: int = 3) -> str:
+    """Deterministic stand-in for the LLM area discussion (used if the call fails) —
+    keeps the same shape: honest budget-fit affirmation, block-level read, two questions."""
+    fam = "family " if living else ""
+    if exact_count >= 3:
+        opener = f"Great — {area_disp} makes good sense for a proper {desc} at around {budget}."
+    elif exact_count >= 1:
+        opener = (f"{area_disp} is a good {fam}area, though proper {desc}s right at {budget} are "
+                  f"limited there — we'll look carefully and may stretch a little.")
+    else:
+        opener = (f"{area_disp} is a lovely {fam}area, but honestly a proper {desc} at {budget} is "
+                  f"hard to find there — we may need to stretch the budget or look at nearby value.")
+    pockets = ""
+    if blocks:
+        first = ", ".join(blocks[:4])
+        pockets = (f" Within {area_disp} the block matters a lot — pockets like {first} tend to be "
+                   f"more residential and balanced for {fam}living, while blocks nearer the main "
+                   f"chowrangis give better connectivity but can feel busier.")
+    return (f"{opener}{pockets}"
+            f"\n\nShould I prioritise a quieter {fam}environment, or better access to main roads, "
+            f"markets and schools? And should I treat lift, parking, backup, water and a proper "
+            f"{fam}building as must-haves?")
+
+
+def _area_intel_message(state: dict, history_text: str, lang: str) -> str:
+    """Fact-constrained LLM discussion fired once the buyer commits to a single area:
+    the engine supplies the real blocks + budget + size; the LLM supplies the local
+    block-level read, adaptive detail, and human tone, then asks the quiet-vs-connected
+    and must-haves questions. Falls back to a deterministic version on any LLM error."""
+    f = state["filters"]
+    locs = [l for l in (f.get("locations") or []) if isinstance(l, str)]
+    if not locs:
+        return ""
+    area_disp = locs[0].split(",")[0].strip()
+    desc = _size_phrase(f)
+    budget = f.get("max_price") or f.get("min_price")
+    living = f.get("purpose") == "living"
+    blocks = _area_blocks(area_disp)
+    blocks_str = ", ".join(blocks)
+    fam = "family " if living else ""
+    if blocks_str:
+        locality_note = (f"Real sub-localities of {area_disp} that exist in our inventory (ONLY "
+                         f"reference these, NEVER invent a block/phase name): {blocks_str}.")
+    else:
+        locality_note = (f"{area_disp} isn't split into distinct blocks in our inventory, so speak "
+                         f"about location WITHIN it generally — main-road/commercial frontage vs "
+                         f"quieter interior lanes — without inventing specific block names.")
+    # Budget-fit reality for THIS exact size in THIS area — so a buyer who self-types a
+    # premium-priced area we don't actually stock at their budget gets an honest heads-up
+    # NOW, instead of a confident affirmation that the reveal then flatly contradicts.
+    exact_count = count_matches(f)
+    if exact_count >= 3:
+        fit_directive = (f"1. Warmly affirm in ONE line that {area_disp} is a sensible, workable choice "
+                         f"for a proper {desc} in this budget (we do have options there).")
+    elif exact_count >= 1:
+        fit_directive = (f"1. Affirm {area_disp} as a good {fam}area, but be HONEST in that same line "
+                         f"that proper {desc}s right at {budget} are limited there, so we'll look carefully "
+                         f"and may consider stretching the budget a little or a nearby value pocket.")
+    else:
+        fit_directive = (f"1. IMPORTANT — at {budget} our inventory has essentially NO proper {desc} in "
+                         f"{area_disp} (they typically cost more there). Open warmly but HONESTLY: {area_disp} "
+                         f"is a lovely {fam}area, yet a proper {desc} at this budget is genuinely hard to find "
+                         f"there. Gently flag that we'd likely need to stretch the budget, consider a slightly "
+                         f"smaller size, or look at nearby value areas — do NOT pretend options exist.")
+    prompt = f"""You are a sharp, warm, genuinely knowledgeable Karachi real-estate advisor mid-consultation, before showing any listings. Talk like an experienced human agent who knows the city block by block — NEVER a form or a bot.
+
+The buyer wants a {desc} at around {budget} and has chosen to focus on {area_disp}.
+{locality_note}
+
+Write a natural, discussion-style reply that:
+{fit_directive}
+2. Shows real local expertise: explain that within {area_disp} the specific block/pocket matters a lot, and give a SHORT, honest read — which pockets tend to be quieter and more residential for {fam}living, versus which are more central/connected but can feel busier or more crowded. Use real Karachi knowledge but ONLY name blocks/areas from the note above (or speak generally if none were given). Never overstate.
+3. Ask which they'd prioritise — a quieter {fam}environment, or better access to main roads, markets and schools.
+4. Then ask whether to treat lift, parking, generator/backup, water, and a proper {fam}building as must-haves.
+
+Judge the right DEGREE OF DETAIL and warmth from how the buyer is engaging in the conversation below — match their depth, never over-talk. Keep it tight: at most two short paragraphs, then the two closing questions. No markdown, no headings, no bullet lists. Reply ONLY in {lang}.
+
+Conversation so far:
+{history_text}
+Return ONLY your reply."""
+    try:
+        return llm.invoke([HumanMessage(content=prompt)]).content.strip()
+    except Exception as e:
+        print(f">> _area_intel_message LLM failed: {e}")
+        return _area_intel_fallback(area_disp, desc, budget, blocks, living, exact_count)
+
+
 def _discovery_question(dimension: str, filters: dict, history_text: str, count: int,
-                        lang: str = "English", user_query: str = "") -> str:
+                        lang: str = "English", user_query: str = "", ack: str = "") -> str:
+    asked_something = _buyer_asked_something(user_query)
+    budget_known = bool(filters.get("max_price") or filters.get("min_price"))
+
+    # NOTE: template questions are returned VERBATIM — no LLM-written preamble. An earlier
+    # "acknowledge what the buyer shared" prepend fired inconsistently (temp 0.7) and stuck
+    # filler like "Thanks — I'll keep that in mind" on plain messages. Cut on purpose:
+    # predictable copy beats a clever line that misfires. `ack` is kept in the signature
+    # but unused; the situational *hints* from the same call still feed ranking silently.
+    def _tmpl(body: str) -> str:
+        return body
+
+    # Combined smart opener — area-or-budget as one branching question.
+    if dimension == "area_budget":
+        return _tmpl(_area_budget_opener(filters, lang))
+
+    # Budget — context-aware framing (premium area → honest; open area → promise
+    # suggestions), unless the buyer asked a question (then answer it via the LLM).
+    if dimension == "budget" and not asked_something:
+        return _tmpl(_budget_question(filters, lang))
+
+    # Area, once budget is known — honest, grounded area guidance instead of a bare ask.
+    if dimension == "area" and budget_known and not asked_something:
+        return _tmpl(_area_suggestion_message(filters, lang))
+
+    # Other clarity dims (or budget/area when nothing context-specific applies) → plain line.
+    if (dimension in _STRAIGHTFORWARD_DIMS
+            and not asked_something
+            and dimension in _CANNED_DIM_QUESTION):
+        canned = _CANNED_DIM_QUESTION[dimension]
+        return _tmpl(canned.get(lang, canned["English"]))
+
     known = []
-    if filters.get("max_price"):
+    if filters.get("max_price") and filters.get("min_price"):
+        known.append(f"budget {filters['min_price']}–{filters['max_price']}")
+    elif filters.get("max_price"):
         known.append(f"budget ~{filters['max_price']}")
+    elif filters.get("min_price"):
+        known.append(f"budget above {filters['min_price']}")
     if filters.get("locations"):
         known.append("areas: " + ", ".join(filters["locations"]))
     if filters.get("types"):
@@ -1765,21 +2551,21 @@ def _discovery_question(dimension: str, filters: dict, history_text: str, count:
     known_str = "; ".join(known) if known else "nothing specific yet"
     extra = ""
     if dimension == "area":
-        areas = _areas_for_budget(filters)
-        if areas:
-            extra = (f"\nAreas that actually have matching stock in their budget right now: {', '.join(areas)}. "
-                     "Proactively suggest 3-4 of these as practical fits and say a word on why; if they'd want "
-                     "pricier areas like DHA or Clifton, gently note those are hard for this size/budget.")
+        # Area suggestions ride on the tappable pills, NOT the message — keep the copy
+        # clean and don't name-drop areas (or DHA/Clifton) in the sentence itself.
+        extra = ("\nThe buyer will see tappable area suggestions below your message, so do NOT list "
+                 "or name specific areas in your sentence — just ask, in one short line, whether they "
+                 "have an area in mind or want your suggestions.")
     prompt = f"""You are a sharp, warm Karachi real-estate advisor mid-consultation (before showing listings) — talk like an experienced human agent, NEVER a form or slot-filler.
 What you already know about this buyer: {known_str}.
 The customer just said: "{user_query}"
 
 Respond the way a real agent would:
 1. If they ASKED a question or raised a concern, ANSWER it directly and helpfully FIRST — you're the expert (e.g. actually explain the compromises, give honest guidance). Never dodge their question by asking another one.
-2. Briefly acknowledge what they told you, in fresh wording.
-3. Then, only if it flows naturally, move forward by learning this next: {_DISCOVERY_DIM_PROMPT[dimension]}{extra}
+2. Otherwise, you MAY open with a SHORT, warm acknowledgement of what they just said — a few words at most ("Got it." / "Perfect.") — then ask the next thing. Keep it genuinely human but brief: NO salesy clichés ("Absolutely —", "Great choice!"), NO justifying or selling their choice back to them ("you'll get the right balance of space/resale/demand"), NO explanation paragraph.
+3. Move forward by learning this next: {_DISCOVERY_DIM_PROMPT[dimension]}{extra}
 
-Hard rules: NEVER ask a question you've already asked in the conversation below — read it first; if you already asked something, do not ask it again. Do NOT interrogate — at most ONE new question, and it's fine to ask none if answering them is what matters this turn. Keep it brief and natural: no lists/bullets/markdown, 1-2 short sentences. Reply ONLY in {lang}.
+Hard rules: NEVER ask a question you've already asked in the conversation below — read it first; if you already asked something, do not ask it again. Do NOT interrogate — at most ONE new question. When you're simply asking the next question (they didn't ask anything), keep it to at most TWO short sentences — an optional few-word acknowledgement, then the question — never a paragraph, no filler, no lists/bullets/markdown. Reply ONLY in {lang}.
 Conversation so far:
 {history_text}
 Return ONLY your reply."""
@@ -1788,17 +2574,25 @@ Return ONLY your reply."""
 
 def _discovery_ask_response(disc: dict) -> dict:
     """Build the API response for a discovery question turn (no results yet)."""
+    opts = _discovery_options(disc.get("dim"), disc.get("filters") or {})
+    # When the agent gives advice then asks (e.g. budget answer → area suggestions +
+    # "which are you leaning toward?"), put that trailing question on its own line —
+    # same treatment the results turn gets. No-op when the text is a bare question.
+    question = _split_closing_question(disc["question"])
     return {
-        "response": disc["question"],
+        "response": question,
         "stage": "discovery",
         "discovery_complete": False,
         "match_count": disc["count"],
         "accumulated_filters": disc["filters"],
-        "next_question": disc["question"],
+        "next_question": question,
         "listings": [],
         "filters": disc["filters"],
         "follow_up": None,
         "actions": [],
+        "options": opts["options"],
+        "options_multi": opts["multi"],
+        "dimension": disc.get("dim"),
         "meta": {"no_results": False, "action": "discovery"},
     }
 
@@ -1818,18 +2612,39 @@ def _discovery_step(user_id: str, user_query: str, history_text: str, start_ok: 
     elif not state["active"]:
         return None
 
-    dropped = _merge_discovery_filters(state, user_query)
+    lang = _detect_language(user_query + " " + history_text)
+    dropped = _merge_discovery_filters(state, user_query, lang)
     count = count_matches(state["filters"])
     wants_results = any(kw in user_query.lower() for kw in _SHOW_RESULTS_KW)
 
     # Budget reality check (once): premium-only areas at a budget with no stock for
     # the size — be honest and redirect, like a real agent, instead of forcing it.
     if not state.get("pushed_back"):
-        reality = _budget_reality_message(state["filters"], _detect_language(user_query + " " + history_text))
+        reality = _budget_reality_message(state["filters"], lang)
         if reality:
             state["pushed_back"] = True
             state["turns"] += 1
-            return {"mode": "ask", "question": reality, "count": count,
+            # dim="area" so better-value areas ride along as tappable pills — the buyer
+            # can pivot to one in a single tap instead of retyping.
+            return {"mode": "ask", "question": reality, "count": count, "dim": "area",
+                    "filters": dict(state["filters"]), "dropped": dropped}
+
+    # Area discussion (once): the buyer has committed to a SINGLE area and we know the
+    # budget — drop down into a knowledgeable, block-level conversation about it instead
+    # of firing the bare floor question. This is the fact-constrained-LLM turn: the engine
+    # hands it the real blocks, the LLM supplies local knowledge + adaptive tone. It also
+    # asks the must-haves, so we mark floor+extras resolved and head to the reveal next.
+    _locs = [l for l in (state["filters"].get("locations") or []) if isinstance(l, str)]
+    if (not state.get("area_discussed") and not wants_results
+            and (state["filters"].get("max_price") or state["filters"].get("min_price"))
+            and len(_locs) == 1):
+        intel = _area_intel_message(state, history_text, lang)
+        if intel:
+            state["area_discussed"] = True
+            state.setdefault("resolved", set()).update({"floor", "extras"})
+            state["last_dim"] = "area_intel"
+            state["turns"] += 1
+            return {"mode": "ask", "question": intel, "count": count, "dim": "area_intel",
                     "filters": dict(state["filters"]), "dropped": dropped}
 
     dim = None if (wants_results or _discovery_ready(state)) else _next_discovery_dim(state)
@@ -1844,19 +2659,44 @@ def _discovery_step(user_id: str, user_query: str, history_text: str, start_ok: 
         }
 
     state["asked"][dim] = state["asked"].get(dim, 0) + 1
+    state["last_dim"] = dim  # so a "you suggest" reply next turn resolves THIS dim
     state["turns"] += 1
-    lang = _detect_language(user_query + " " + history_text)
-    if dim == "recap":
-        question = _discovery_recap(state["filters"], lang)
-    else:
-        question = _discovery_question(dim, state["filters"], history_text, count, lang, user_query)
+    question = _discovery_question(dim, state["filters"], history_text, count, lang, user_query,
+                                   ack=state.get("_last_ack") or "")
     return {
         "mode": "ask",
         "question": question,
         "count": count,
+        "dim": dim,
         "filters": dict(state["filters"]),
         "dropped": dropped,
     }
+
+
+def _split_closing_question(text: str) -> str:
+    """Put a trailing follow-up question on its own line.
+
+    The advisory copy ends with one contextual question; the LLM often keeps it
+    glued to the explanation paragraph. The web UI renders \\n as <br>, so we
+    insert a blank line before the final question. No-op when the text doesn't
+    end in a question, so it's safe to call on any channel/branch.
+    """
+    if not text:
+        return text
+    s = text.rstrip()
+    if not (s.endswith("?") or s.endswith("؟")):  # latin or arabic '?'
+        return text
+    body = s[:-1]
+    # last sentence terminator (latin + urdu/arabic) followed by whitespace
+    matches = list(re.finditer(r"[.!?؟۔]\s+", body))
+    if not matches:
+        return text
+    split_at = matches[-1].end()
+    head = s[:split_at].rstrip()
+    question = s[split_at:].strip()
+    if not head or not question:
+        return text
+    return head + "\n\n" + question
 
 
 def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
@@ -2306,7 +3146,7 @@ Rules:
         if is_opening:
             length_guidance = """This is the user's FIRST search — keep it SHORT, ~55-70 words total, easy to skim. Write ONE compact 2-sentence body, then the closing question on its own line. Sentence 1: how many options + the price band + a SHORT area characterization (name at most 2-3 areas, or just say "budget-friendly areas" — do NOT list every neighbourhood). Sentence 2: ONE recommendation with a brief why — no second pick, no amenity list. Then the question. If in doubt, cut."""
         else:
-            length_guidance = """The conversation is already going, so a brief advisory answer is welcome — but keep it tight: at most two short paragraphs, and shorter is better. You may compare two options only if it genuinely helps the user decide. Cut anything that isn't pulling its weight."""
+            length_guidance = """The conversation is already going, so a brief advisory answer is welcome — but keep it tight: at most two short paragraphs, and shorter is better. You may compare two options only if it genuinely helps the user decide. Cut anything that isn't pulling its weight. Always put the closing question on its own line, separated from the paragraph above by a blank line."""
 
         system_prompt = f"""You are a sharp, friendly real estate advisor for Karachi — not a search engine. The user just searched and a grid of property cards is shown beside this chat. Talk like a knowledgeable friend who is helping them think, not a bot reading out a list.
 
@@ -2318,7 +3158,7 @@ Cover these three beats (no headings, no bullets, plain text only) — scale how
 
 2) GIVE A POINT OF VIEW — this is what makes you useful, not robotic. Don't just name the cheapest and the top match neutrally. Give a small, honest recommendation WITH the reasoning, grounded in what the user has and hasn't told you. Example of the *kind* of judgement (adapt to the actual data, never invent): if they gave a budget but no bedrooms, gently steer toward the choice that's better practical value rather than just the cheapest ("rather than the cheapest 1-bed, the 2-bed in X is worth a look first because it gives real family space within the same budget"). When you name a property, write its title EXACTLY as it appears in the overview so it can be linked, and NEVER use an ID number. Mention a standout amenity only if it genuinely strengthens the pick. If the user asked for an amenity that NO result has, say so honestly in one short clause — never pretend it's there.
 
-3) CLOSE WITH ONE CONTEXTUAL QUESTION (always 1 sentence) — the most important line. This is what makes the chat feel alive. Ask ONE specific, natural follow-up that moves the user forward by targeting something they HAVEN'T pinned down yet. Dimensions still open for this user: {open_dims_hint}. Pick the one or two that matter most and ask about them concretely — e.g. "Want me to narrow these by area, or by how many bedrooms you need?" NEVER ask a generic "what matters most to you: price, size, or location?" or "anything else?" — it must feel like it was written for THIS search.
+3) CLOSE WITH ONE CONTEXTUAL QUESTION (always 1 sentence) — the most important line. Put it on its OWN line, separated from the paragraph above by a blank line. This is what makes the chat feel alive. Ask ONE specific, natural follow-up that moves the user forward by targeting something they HAVEN'T pinned down yet. Dimensions still open for this user: {open_dims_hint}. Pick the one or two that matter most and ask about them concretely — e.g. "Want me to narrow these by area, or by how many bedrooms you need?" NEVER ask a generic "what matters most to you: price, size, or location?" or "anything else?" — it must feel like it was written for THIS search.
 
 Hard rules:
 - Never formal, never "I'm sorry"/"I apologize"/"database". No markdown (**bold**, *italics*, backticks).
@@ -2336,7 +3176,7 @@ Rules:
 - NEVER repeat back criteria the user already stated — they know what they searched for. Instead ADD what they couldn't already know: standout amenities, size (sq yd), value vs other options, notable features (sea view, gated community, pool, etc.).
 - If the query already specifies location + type + bedrooms, skip restating those — lead with price and then a differentiating detail.
 - Describe ONE property only — the FIRST in the Available properties list. Do not mention other options.
-- End with ONE short, contextual follow-up question that moves them forward — e.g. offer to line it up against a cheaper option, pull the agent's contact, or show more photos. Make it specific to THIS property, never a generic "anything else?".
+- End with ONE short, contextual follow-up question that moves them forward — e.g. offer to line it up against a cheaper option, pull the agent's contact, or show more photos. Make it specific to THIS property, never a generic "anything else?". Put this question on its own line, separated from the text above by a blank line.
 - NEVER reference any property by ID number. Never invent details not in 'Available properties' below.
 - If the user asked for specific amenities not available in any shown property, acknowledge it honestly in one short clause (e.g. "though it doesn't have on-site security"). Never pretend a missing amenity is present.
 - Match the user's language (Urdu or English).
@@ -2364,6 +3204,25 @@ User's query (treat this as already-known context — do NOT repeat it back): "{
     else:
         results_block = f"Available properties:{context}"
 
+    # Turn the relaxed-field names into one honest, human clause for the reveal copy.
+    relax_note = ""
+    if discovery_dropped and not no_results:
+        _RELAX_PHRASE = {
+            "bedrooms": "included options one bedroom off from what you asked",
+            "budget":   "added a few options a little above your budget",
+            "area":     "looked just beyond your preferred area",
+            "floor_band": "eased the floor preference",
+            "has_lift": "eased the lift requirement",
+        }
+        phrases = []
+        for f in discovery_dropped:
+            phrases.append(_RELAX_PHRASE.get(f, "eased a couple of the softer preferences"))
+        # de-dupe while preserving order
+        seen = set(); phrases = [p for p in phrases if not (p in seen or seen.add(p))]
+        joined = phrases[0] if len(phrases) == 1 else ", ".join(phrases[:-1]) + " and " + phrases[-1]
+        relax_note = (f"NOTE: nothing matched every criterion exactly, so to give a real shortlist I {joined}. "
+                      "Mention this honestly in ONE short, warm clause — don't apologise or over-explain.")
+
     user_prompt = f"""Conversation history:
 {history_text}
 
@@ -2372,13 +3231,18 @@ User query: {user_query}
 {results_block}
 
 {f"User requested amenities: {requested_am or 'none'}. Available in results: {satisfied_am or 'none'}. NOT available in any result: {missing_am or 'none'}." if not no_results else ""}
-{f"NOTE: no property matched the inferred requirement(s) {discovery_dropped}, so that was relaxed — gently mention this in one short clause." if discovery_dropped else ""}
+{relax_note}
 {advisory_block}
 {alt_block}
 {"Tell the user nothing matched and suggest what to try." if no_results else "Answer naturally based on the information above."}"""
 
     response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
     ai_response = response.content
+
+    # Web shows the follow-up question inline; keep it on its own line. (On
+    # WhatsApp CALL 1 has no trailing question, so this is a no-op there.)
+    if channel != "whatsapp":
+        ai_response = _split_closing_question(ai_response)
 
     memory.chat_memory.add_user_message(user_query)
     memory.chat_memory.add_ai_message(ai_response)

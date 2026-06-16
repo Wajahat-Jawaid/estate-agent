@@ -180,6 +180,9 @@ def chat(request: MessageRequest):
         "filters": result["filters"],
         "follow_up": result.get("follow_up"),
         "actions": result.get("actions", []),
+        "options": result.get("options", []),
+        "options_multi": result.get("options_multi", False),
+        "dimension": result.get("dimension"),
         "meta": result.get("meta", {}),
     }
 

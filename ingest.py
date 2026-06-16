@@ -34,6 +34,8 @@ def listing_to_text(listing):
     nearby = [label for key, label in (
         ("near_hospital", "hospital"), ("near_school", "school"),
         ("near_park", "park"), ("near_masjid", "masjid/mosque"),
+        ("near_market", "market/shopping"), ("near_restaurant", "restaurants"),
+        ("near_transport", "public transport"),
     ) if listing.get(key)]
     nearby_desc = ", ".join(nearby) if nearby else "none noted"
     gated_desc = "yes, gated/secure community" if listing.get("gated_community") else "no"
@@ -89,6 +91,11 @@ metadatas = [
         "near_school": bool(l.get("near_school", False)),
         "near_park": bool(l.get("near_park", False)),
         "near_masjid": bool(l.get("near_masjid", False)),
+        # Proximity flags unified into scalars (market/restaurant/transport were
+        # previously only "Nearby X" strings inside the amenities array)
+        "near_market": bool(l.get("near_market", False)),
+        "near_restaurant": bool(l.get("near_restaurant", False)),
+        "near_transport": bool(l.get("near_transport", False)),
         "gated_community": bool(l.get("gated_community", False)),
         # Data enrichment round 2 (for deep family discovery)
         "total_floors": l.get("total_floors", 0),

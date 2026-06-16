@@ -313,12 +313,111 @@
     grid-template-columns: 38% 62%;
     flex: 1;
     overflow: hidden;
+    transition: grid-template-columns 0.75s cubic-bezier(0.66, 0, 0.34, 1);
   }
 
   .panel {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  /* ── DISCOVERY MODE (full-screen, ChatGPT-style chat) ── */
+  body.mode-discovery .filter-bar { display: none; }
+
+  body.mode-discovery .main {
+    grid-template-columns: 100% 0%;
+  }
+
+  /* collapse the results panel out of view while we elicit needs */
+  body.mode-discovery .panel:last-child {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  body.mode-results .panel:last-child {
+    transition: opacity 0.5s ease 0.35s;
+  }
+
+  /* hide the chat panel header chrome for a clean full-screen feel */
+  body.mode-discovery .panel:first-child .panel-head { display: none; }
+  body.mode-discovery .panel:first-child { border-right: none; }
+
+  /* center the chat column like Claude/ChatGPT web */
+  body.mode-discovery .chat-messages,
+  body.mode-discovery .suggestions {
+    max-width: 720px;
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  body.mode-discovery .suggestions { justify-content: center; padding-bottom: 16px; }
+  body.mode-discovery .chat-input-area { display: flex; justify-content: center; }
+  body.mode-discovery .chat-input-area > .chat-input-wrap,
+  body.mode-discovery .chat-input-wrap {
+    max-width: 720px;
+    width: 100%;
+  }
+
+  /* ── LIVE MATCH COUNTER ── */
+  .discovery-counter {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 720px;
+    width: 100%;
+    margin: 16px auto 0;
+    padding: 16px 20px;
+    background: linear-gradient(135deg, rgba(26,92,46,0.05), rgba(26,92,46,0.01));
+    border: 1px solid rgba(26,92,46,0.18);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+  }
+  body.mode-discovery .discovery-counter.dc-visible { display: flex; }
+
+  .dc-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .dc-pulse {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--primary);
+    align-self: center;
+    animation: pulse 2s infinite;
+    flex-shrink: 0;
+  }
+  .dc-number {
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--primary);
+    letter-spacing: -0.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .dc-label {
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+  }
+  .dc-track {
+    height: 5px;
+    border-radius: 100px;
+    background: rgba(26,92,46,0.12);
+    overflow: hidden;
+  }
+  .dc-fill {
+    height: 100%;
+    width: 4%;
+    border-radius: 100px;
+    background: linear-gradient(90deg, var(--primary-light), var(--primary));
+    transition: width 0.7s cubic-bezier(0.33, 1, 0.68, 1);
+  }
+  .dc-hint {
+    font-size: var(--text-xs);
+    color: var(--text-hint);
   }
 
   /* ── PANEL HEADERS ── */
@@ -502,6 +601,35 @@
     color: var(--primary);
     background: rgba(26,92,46,0.05);
   }
+
+  /* ── DISCOVERY QUICK-REPLY PILLS ── */
+  .disc-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    padding: 2px 4px 10px;
+    margin: -2px 0 4px;
+    animation: discPillsIn 0.25s ease;
+  }
+  @keyframes discPillsIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .disc-chip {
+    font-family: 'Inter', sans-serif;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: 7px 14px;
+    border-radius: 100px;
+    border: 1px solid var(--primary);
+    background: rgba(26,92,46,0.04);
+    color: var(--primary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .disc-chip:hover { background: rgba(26,92,46,0.12); }
+  .disc-chip:active { transform: scale(0.95); }
+  .disc-chip.selected { background: var(--primary); color: #fff; }
+  .disc-chip.disc-done { background: var(--primary); color: #fff; border-color: var(--primary); font-weight: 600; }
+  .disc-chip.disc-done:hover { background: var(--primary-light); }
 
   /* ── CHAT INPUT ── */
   .chat-input-area {
@@ -783,6 +911,25 @@
     font-weight: 700;
     padding: 4px 8px;
     box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+  }
+
+  .relax-ribbon {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    background: rgba(180, 83, 9, 0.94);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    padding: 3px 8px;
+    border-radius: 100px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    pointer-events: none;
+    max-width: calc(100% - 16px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .grid-body { padding: 12px; display: flex; flex-direction: column; flex: 1; }
@@ -1285,7 +1432,7 @@
   .hero-agent-role { font-size: 11px; color: #9aa3af; margin-top: 1px; }
 </style>
 </head>
-<body>
+<body class="mode-discovery">
 
 <div class="topbar">
   <div class="logo">zameen<span>.com</span></div>
@@ -1370,13 +1517,23 @@
   <button class="filter-reset-btn" onclick="resetFilters()">Reset</button>
 </div>
 
-<div class="main">
+<div class="main" id="main">
 
   <!-- CHAT PANEL -->
   <div class="panel">
     <div class="panel-head">
       <div class="panel-title">Chat</div>
       <button class="reset-chat-btn" onclick="resetChat()">New conversation</button>
+    </div>
+
+    <div class="discovery-counter" id="discoveryCounter">
+      <div class="dc-row">
+        <span class="dc-pulse"></span>
+        <span class="dc-number" id="dcNumber">—</span>
+        <span class="dc-label" id="dcLabel">properties match so far</span>
+      </div>
+      <div class="dc-track"><div class="dc-fill" id="dcFill"></div></div>
+      <div class="dc-hint" id="dcHint">Tell me a bit more and I'll narrow it down for you.</div>
     </div>
 
     <div class="chat-messages" id="chatMessages">
@@ -1430,12 +1587,11 @@
 </div>
 
 <script>
-  // Generate unique session ID per browser tab
-  let sessionId = localStorage.getItem('sessionId');
-  if (!sessionId) {
-      sessionId = 'web_' + Math.random().toString(36).substr(2, 9);
-      localStorage.setItem('sessionId', sessionId);
-  }
+  // Fresh session per page load. Server-side memory/discovery state is in-process
+  // and keyed by this id, so persisting it across reloads would silently resume the
+  // previous conversation (the new first message would land mid-discovery) even
+  // though the UI shows a clean welcome screen. A reload should start clean.
+  let sessionId = 'web_' + Math.random().toString(36).substr(2, 9);
 
   function formatPrice(price) {
     const croreMatch = price.match(/(\d+)\s*crore/);
@@ -1499,6 +1655,71 @@
   let currentFilters = {};
   let selectedListingId = null;
   let topPickId = null;
+
+  // ── DISCOVERY MODE STATE ────────────────────────────────────
+  let appMode = 'discovery';      // 'discovery' (full-screen chat) | 'results' (split view)
+  let dcInitialCount = null;      // first match_count seen — baseline for the narrowing bar
+  let dcCurrent = 0;              // number currently shown in the counter (for animation)
+
+  function setMode(mode) {
+    appMode = mode;
+    document.body.classList.toggle('mode-discovery', mode === 'discovery');
+    document.body.classList.toggle('mode-results', mode === 'results');
+  }
+
+  // Smoothly tween the counter number from its current value to `to`.
+  function animateCount(to) {
+    const el = document.getElementById('dcNumber');
+    const from = dcCurrent || 0;
+    if (to === from) { el.textContent = to; return; }
+    const duration = 650;
+    const start = performance.now();
+    function tick(now) {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);   // ease-out cubic
+      el.textContent = Math.round(from + (to - from) * eased);
+      if (t < 1) requestAnimationFrame(tick);
+      else { el.textContent = to; dcCurrent = to; }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // Reveal + update the live match counter during discovery.
+  function updateDiscoveryCounter(count) {
+    if (count == null) return;
+    const counter = document.getElementById('discoveryCounter');
+    counter.classList.add('dc-visible');
+
+    // Baseline = the widest set we've seen, so the bar fills as we narrow.
+    if (dcInitialCount == null || count > dcInitialCount) dcInitialCount = count || 1;
+    animateCount(count);
+
+    const initial = dcInitialCount || 1;
+    let pct = initial > 0 ? (1 - count / initial) * 100 : 0;
+    pct = Math.max(4, Math.min(100, pct));
+    document.getElementById('dcFill').style.width = pct + '%';
+
+    const label = document.getElementById('dcLabel');
+    const hint = document.getElementById('dcHint');
+    if (count === 0) {
+      label.textContent = 'exact matches — I can widen the search';
+      hint.textContent = "Nothing fits all of that exactly. Tell me what's flexible and I'll find the closest.";
+    } else if (count === 1) {
+      label.textContent = 'property matches so far';
+      hint.textContent = "Very specific — answer one more and I'll show it.";
+    } else {
+      label.textContent = 'properties match so far';
+      hint.textContent = count > 60
+        ? "Tell me a bit more and I'll narrow it down for you."
+        : "Getting close — a couple more details and I'll reveal them.";
+    }
+  }
+
+  function hideDiscoveryCounter() {
+    document.getElementById('discoveryCounter').classList.remove('dc-visible');
+    dcInitialCount = null;
+    dcCurrent = 0;
+  }
 
   // ── FILTER BAR ──────────────────────────────────────────────
 
@@ -1697,6 +1918,55 @@
     container.scrollTop = container.scrollHeight;
   }
 
+  // ── DISCOVERY QUICK-REPLY PILLS ─────────────────────────────
+  // Context-grounded chips offered under a discovery question. Tapping a single
+  // pill sends it immediately; multi-select (areas) collects then sends on Done.
+  // Pills are additive — free-typing the answer instead always works too.
+  function clearDiscoveryOptions() {
+    const el = document.getElementById('discOptions');
+    if (el) el.remove();
+  }
+
+  function renderDiscoveryOptions(options, multi) {
+    clearDiscoveryOptions();
+    if (!options || !options.length) return;
+    const container = document.getElementById('chatMessages');
+    const wrap = document.createElement('div');
+    wrap.className = 'disc-options';
+    wrap.id = 'discOptions';
+
+    if (multi) {
+      const selected = new Set();
+      const doneBtn = document.createElement('button');
+      doneBtn.className = 'disc-chip disc-done';
+      doneBtn.textContent = 'Done';
+      doneBtn.style.display = 'none';
+      doneBtn.onclick = () => { if (selected.size) sendMessage([...selected].join(', ')); };
+      options.forEach(opt => {
+        const chip = document.createElement('button');
+        chip.className = 'disc-chip';
+        chip.textContent = opt.label;
+        chip.onclick = () => {
+          if (selected.has(opt.value)) { selected.delete(opt.value); chip.classList.remove('selected'); }
+          else { selected.add(opt.value); chip.classList.add('selected'); }
+          doneBtn.style.display = selected.size ? 'inline-flex' : 'none';
+        };
+        wrap.appendChild(chip);
+      });
+      wrap.appendChild(doneBtn);
+    } else {
+      options.forEach(opt => {
+        const chip = document.createElement('button');
+        chip.className = 'disc-chip';
+        chip.textContent = opt.label;
+        chip.onclick = () => sendMessage(opt.value);
+        wrap.appendChild(chip);
+      });
+    }
+    container.appendChild(wrap);
+    container.scrollTop = container.scrollHeight;
+  }
+
   function showTyping() {
     const container = document.getElementById('chatMessages');
     const t = document.createElement('div');
@@ -1746,6 +2016,8 @@
     selectedListingId = null;
     updateResults([]);
     resetFilters();
+    hideDiscoveryCounter();
+    setMode('discovery');
     fetch(`${API_URL}/reset`, { method: 'POST' }).catch(() => {});
   }
 
@@ -1876,6 +2148,13 @@
 
       const yieldLine = '';
 
+      // "Closest match" easements from the discovery reveal — keep cards honest.
+      const RELAX_LABELS = { budget: 'slightly over budget', bedrooms: '±1 bedroom', area: 'nearby area' };
+      const relaxed = [...new Set(listing.relaxed || [])].map(r => RELAX_LABELS[r]).filter(Boolean);
+      const relaxRibbon = relaxed.length
+        ? `<span class="relax-ribbon" title="Closest match — ${relaxed.join(', ')}">≈ ${relaxed.join(' · ')}</span>`
+        : '';
+
       const card = document.createElement('div');
       card.className = 'grid-card';
       card.dataset.listingId = m.id;
@@ -1884,6 +2163,7 @@
         <div class="grid-img-wrap">
           ${imgUrl ? `<img class="grid-img" src="${imgUrl}" alt="${m.title}" loading="lazy" onerror="this.style.display='none'">` : ''}
           <span class="score-pill">${score}%</span>
+          ${relaxRibbon}
         </div>
         <div class="grid-body">
           <div class="grid-title">${m.title}</div>
@@ -1908,12 +2188,14 @@
 
   // ── SEND ────────────────────────────────────────────────────
 
-  async function sendMessage() {
+  async function sendMessage(presetText) {
     if (isLoading) return;
     const input = document.getElementById('chatInput');
-    const message = input.value.trim();
+    // presetText comes from a tapped discovery pill; otherwise read the composer.
+    const message = (typeof presetText === 'string' ? presetText : input.value).trim();
     if (!message) return;
 
+    clearDiscoveryOptions();
     isLoading = true;
     document.getElementById('sendBtn').disabled = true;
     document.getElementById('suggestions').style.display = 'none';
@@ -1934,6 +2216,24 @@
       removeTyping();
       hideSkeletons();
       appendMessage('bot', data.response, data.listings);
+
+      // ── DISCOVERY vs RESULTS ──────────────────────────────────
+      // While the agent is still eliciting needs, stay full-screen. We use a SOFT
+      // match strategy (closest matches at reveal), so the live progressive counter
+      // is intentionally not shown. Don't touch the filter bar or grid here.
+      const stillDiscovering = data.stage === 'discovery' && !data.discovery_complete;
+      if (stillDiscovering) {
+        setMode('discovery');
+        renderDiscoveryOptions(data.options, data.options_multi);
+        isLoading = false;
+        document.getElementById('sendBtn').disabled = false;
+        input.focus();
+        return;
+      }
+
+      // Reveal (or any post-discovery turn): animate into the split view.
+      setMode('results');
+      hideDiscoveryCounter();
 
       if (data.filters && Object.keys(data.filters).length > 0) {
         resetFilters();
