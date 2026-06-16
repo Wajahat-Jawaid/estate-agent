@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 import httpx
-from agent import get_response, get_user_memory, user_memories, user_search_histories, user_pending_queries, user_discovery_states, price_to_lacs, lacs_to_price
+from agent import get_response, get_user_memory, user_memories, user_search_histories, user_pending_queries, user_discovery_states, user_seller_states, price_to_lacs, lacs_to_price
 from mortgage_handler import user_mortgage_states
 
 # ── Persist welcomed users across restarts ──
@@ -427,6 +427,7 @@ def reset():
     user_mortgage_states.clear()
     user_pending_queries.clear()
     user_discovery_states.clear()
+    user_seller_states.clear()
     return {"status": "reset"}
 
 @app.get("/health")

@@ -2615,7 +2615,16 @@ def _discovery_step(user_id: str, user_query: str, history_text: str, start_ok: 
     lang = _detect_language(user_query + " " + history_text)
     dropped = _merge_discovery_filters(state, user_query, lang)
     count = count_matches(state["filters"])
-    wants_results = any(kw in user_query.lower() for kw in _SHOW_RESULTS_KW)
+    # "show me ..." is an escape hatch out of discovery — but only honour it once we
+    # have something concrete to shortlist on (budget, area, or an explicit bedroom
+    # count). Otherwise a first-turn "show me some flats" — which sets only a property
+    # TYPE — would skip qualification entirely and dump random listings. A bare type
+    # (or a soft, inferred bedrooms_floor) is not enough; keep discovering and ask the
+    # first qualifying question instead.
+    _qual_keys = ("max_price", "min_price", "locations", "bedrooms", "bedrooms_min")
+    _has_qualifier = any(state["filters"].get(k) for k in _qual_keys)
+    wants_results = (any(kw in user_query.lower() for kw in _SHOW_RESULTS_KW)
+                     and _has_qualifier)
 
     # Budget reality check (once): premium-only areas at a budget with no stock for
     # the size — be honest and redirect, like a real agent, instead of forcing it.
@@ -2699,6 +2708,114 @@ def _split_closing_question(text: str) -> str:
     return head + "\n\n" + question
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Seller flow (valuation / handoff)
+# ──────────────────────────────────────────────────────────────────────────
+# A seller is NOT a buyer. "I want to sell my flat" must switch out of buyer
+# discovery into a short, one-question-at-a-time valuation intake that ends in an
+# agent handoff — never a buyer property search. State is per-user so follow-up
+# answers ("DHA Phase 5", "3 bed") stay in the seller flow instead of leaking back
+# into a buyer area/bedroom search.
+user_seller_states = {}  # user_id -> {"data": dict, "pending": str|None}
+
+# Deterministic seller-intent detection. Word-boundary guarded so buyer phrasing
+# ("should I sell or rent first", "best seller area", "resell value") does NOT
+# match — only a clear intent to sell THEIR property.
+_SELLER_INTENT_RE = re.compile(
+    r"\b(?:i\s+(?:want|need|wish|would\s+like|am\s+looking|am\s+planning|am\s+trying)\s+to\s+sell"
+    r"|want\s+to\s+sell|wanna\s+sell|looking\s+to\s+sell|planning\s+to\s+sell|trying\s+to\s+sell"
+    r"|i['’]?m\s+selling|sell\s+(?:my|our|this)\b)"
+    r"|\blist\s+my\s+(?:flat|house|home|property|apartment|portion|plot|shop|bungalow)\b"
+    r"|\b(?:bechna|bechni|bech\s*do|becham|becho)\b"
+    r"|\bmera\s+(?:ghar|flat|makan|makaan|plot|portion)\s+(?:bech|sale)"
+    r"|\bvaluation\s+(?:of|for)\s+my\b",
+    re.IGNORECASE,
+)
+
+
+def detect_seller_intent(query: str) -> bool:
+    return bool(_SELLER_INTENT_RE.search(query or ""))
+
+
+# One question at a time (CLAUDE.md hard rule). Order mirrors a real listing intake.
+_SELLER_STEPS = ["location", "size", "bedrooms", "condition", "price", "contact"]
+
+_SELLER_Q = {
+    "English": {
+        "location": "Sure — I can help you get it listed and valued. Which area or block is your property in?",
+        "size": "Got it. How big is it — covered area or yards?",
+        "bedrooms": "And how many bedrooms does it have?",
+        "condition": "What condition is it in — newly built, well-maintained, or does it need some work?",
+        "price": "What price do you have in mind?",
+        "contact": "Perfect. What's the best number for our listing agent to reach you on?",
+    },
+    "Urdu": {
+        "location": "Zaroor — main aap ki property list aur value karwa sakta hoon. Property kis area ya block mein hai?",
+        "size": "Theek hai. Property kitni bari hai — covered area ya gaz mein?",
+        "bedrooms": "Is mein kitne bedrooms hain?",
+        "condition": "Condition kaisi hai — nayi bani, achi maintain, ya thori kaam ki zaroorat hai?",
+        "price": "Aap ke zehan mein kya price hai?",
+        "contact": "Bilkul. Hamare listing agent ke liye behtareen contact number kya hai?",
+    },
+}
+
+_SELLER_LEAD = {
+    "English": "Sure — I can help you get it listed and valued. ",
+    "Urdu": "Zaroor — main aap ki property list aur value karwa sakta hoon. ",
+}
+
+
+def _seller_summary(data: dict, lang: str) -> str:
+    loc = data.get("location", "—"); size = data.get("size", "—")
+    beds = data.get("bedrooms", "—"); cond = data.get("condition", "—")
+    price = data.get("price", "—"); contact = data.get("contact", "—")
+    if lang == "Urdu":
+        return (f"Shukriya! Main ne aap ki property note kar li hai — {loc}, {beds} bed, "
+                f"{size}, condition: {cond}, expected price {price}. Hamara listing agent "
+                f"jald hi aap ko {contact} par call kar ke valuation aur agle steps arrange karega. 🙏")
+    return (f"Thanks! I've logged your property — {loc}, {beds} bed, {size}, condition: {cond}, "
+            f"expected price {price}. Our listing agent will call you on {contact} shortly to "
+            f"arrange a valuation and next steps. 🙏")
+
+
+def _seller_resp(text: str, action: str) -> dict:
+    return {"response": text, "listings": [], "filters": {}, "follow_up": None,
+            "actions": [], "meta": {"no_results": False, "action": action}}
+
+
+def _seller_step(user_id: str, user_query: str, lang: str, is_start: bool):
+    """Drive one turn of the seller valuation intake. On start, capture an area if
+    the trigger message named one. Otherwise record the answer to the question we
+    last asked, then ask the next unfilled field — or hand off when complete."""
+    if is_start:
+        state = {"data": {}, "pending": None}
+        areas = _match_karachi_areas(user_query)
+        if areas:
+            state["data"]["location"] = ", ".join(areas)
+        user_seller_states[user_id] = state
+    else:
+        state = user_seller_states.get(user_id)
+        if not state:
+            return None
+        if state.get("pending"):
+            state["data"][state["pending"]] = user_query.strip()
+            state["pending"] = None
+
+    data = state["data"]
+    nxt = next((s for s in _SELLER_STEPS if s not in data), None)
+    if nxt is None:  # all fields collected → hand off and end the session
+        user_seller_states.pop(user_id, None)
+        return _seller_resp(_seller_summary(data, lang), "seller_handoff")
+
+    state["pending"] = nxt
+    q = _SELLER_Q[lang][nxt]
+    # If we skipped the location question (captured from the trigger), keep the warm
+    # lead-in so the first reply still acknowledges we understood the seller intent.
+    if is_start and nxt != "location":
+        q = _SELLER_LEAD[lang] + q
+    return _seller_resp(q, "seller")
+
+
 def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
     memory = get_user_memory(user_id)
     search_history = get_user_search_history(user_id)
@@ -2711,6 +2828,28 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
             history_text += f"User: {msg.content}\n"
         elif isinstance(msg, AIMessage):
             history_text += f"Assistant: {msg.content}\n"
+
+    # ── Seller flow (CONTINUE an active valuation session) ──
+    # Runs first so a seller's answers ("DHA Phase 5", "3 bed") stay in the seller
+    # intake and are never hijacked as a buyer area/bedroom search.
+    _seller_lang = _detect_language(user_query + " " + history_text)
+    if user_id in user_seller_states:
+        result = _seller_step(user_id, user_query, _seller_lang, is_start=False)
+        if result is not None:
+            memory.chat_memory.add_user_message(user_query)
+            memory.chat_memory.add_ai_message(result["response"])
+            return result
+
+    # ── Seller flow (START on detecting seller intent) ──
+    # Switches out of buyer discovery into a valuation/handoff flow. Checked before
+    # the discovery-continue block so a buyer can pivot ("actually I want to sell"),
+    # and any in-progress buyer discovery is abandoned.
+    if detect_seller_intent(user_query):
+        user_discovery_states.pop(user_id, None)
+        result = _seller_step(user_id, user_query, _seller_lang, is_start=True)
+        memory.chat_memory.add_user_message(user_query)
+        memory.chat_memory.add_ai_message(result["response"])
+        return result
 
     discovery_filters = None
     discovery_search_query = None
