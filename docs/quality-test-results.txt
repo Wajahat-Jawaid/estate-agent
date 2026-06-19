@@ -1,0 +1,354 @@
+
+======================================================================
+REPLAY: 1. Full journey — family buyer, accessibility, objection  (user_id=q_journey_7dc512)
+======================================================================
+>> Property signal detected — bypassing small-talk gate
+
+----------------------------------------------------------------------
+T1  C: I'm looking for a 3 bed apartment for my family
+   exp: Sure. To guide you well — what budget should I keep in mind, or which area suits you?
+   BOT: Sure, I can help. Since it's a 3-bed apartment for family living, the area and budget real
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [92mMATCH[0m — Both are discovery questions asking for the key next details needed to search: budget and/or preferred area.
+
+----------------------------------------------------------------------
+T2  C: Around 2.5 crore
+   exp: Got it. Which areas work for you?
+   BOT: Great — 2.5 crore is a workable budget for a proper 3-bed family apartment in Karachi.
+
+In
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [92mMATCH[0m — Both replies are discovery-focused and ask the user to specify preferred areas/side of Karachi to narrow the search.
+
+----------------------------------------------------------------------
+T3  C: DHA or Clifton, whichever has better options
+   exp: Noted. A proper 3-bed in DHA/Clifton near 2.5 crore is tight, so I'll focus on the stronge
+   BOT: Honestly, for a proper 3-bed in Clifton or DHA, 2.5 crore is quite tight right now — at th
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [92mMATCH[0m — Both responses communicate that DHA/Clifton options near the stated budget are tight and set expectations honestly, while steering toward stronger alternatives if the customer is flexible.
+
+----------------------------------------------------------------------
+T4  C: We have my mother living with us, she can't do stairs
+   exp: Then lift and reliable backup are must-haves. I'll only consider buildings with a working 
+   BOT: Got it — with your mother at home, a lift becomes important.
+
+Do you prefer ground, middle
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [92mMATCH[0m — Both replies treat stair access as a key requirement and effectively prioritize a lift/ground-floor constraint for the mother’s mobility needs.
+>> Discovery reveal with filters: {'near_school': True, 'near_park': True, 'gated_community': True, 'purpose': 'living', 'bedrooms_floor': 3, 'types': ['apartment'], 'bedrooms': 3, 'max_price': '2.5 crore', 'locations': ['Clifton', 'DHA'], 'floor': 0, 'near_hospital': True}
+>> Clifton: 6 candidates
+>> DHA: 6 candidates
+>> Price sort: target=250 lacs, candidates=10, prices=[527, 564, 590, 660, 664, 728, 782, 785, 786, 807]
+>> After sort top-5 prices: [527, 564, 590, 660, 664]
+>> Clifton: 6 candidates
+>> DHA: 6 candidates
+>> Price sort: target=250 lacs, candidates=10, prices=[527, 564, 590, 660, 664, 728, 782, 785, 786, 807]
+>> After sort top-5 prices: [527, 564, 590, 660, 664]
+>> Clifton: 7 candidates
+>> DHA: 1 candidates
+>> Price sort: target=250 lacs, candidates=8, prices=[199, 590, 660, 664, 728, 754, 782, 1035]
+>> After sort top-5 prices: [199, 590, 660, 664, 728]
+>> Clifton: 6 candidates
+>> DHA: 6 candidates
+>> Price sort: target=284 lacs, candidates=10, prices=[527, 564, 590, 660, 664, 728, 782, 785, 786, 807]
+>> After sort top-5 prices: [527, 564, 590, 660, 664]
+>> Price sort: target=250 lacs, candidates=8, prices=[186, 210, 219, 226, 233, 244, 247]
+>> After sort top-5 prices: [247, 244, 233, 226, 226]
+>> New search saved as: 'Clifton / DHA, apartment, 3 bed, under 2.5 crore'
+>> Actions decided: {'follow_up': 'Want me to narrow these by area, or by how many bedrooms you need?', 'actions': [{'id': 'cheaper', 'label': '💸 Cheaper options'}, {'id': 'larger', 'label': '🏠 Larger properties'}, {'id': 'contact', 'label': '📲 Agent contacts'}]}
+
+----------------------------------------------------------------------
+T5  C: Show me what you have
+   exp: Here are family 3-bed options with lift; these are the closest matches within your budget.
+   BOT: I’ve got 8 options here, running from 1.86 crore to 2.47 crore, mostly spread across Gulsh
+   facts: {'stage': 'results', 'listings': 8, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [92mMATCH[0m — Both responses present shortlisted family-friendly 3-bed options within budget and steer toward the closest practical matches, with the bot additionally refining by lift/floor preferences.
+>> Quick check: 'PROPERTY'
+>> Classification: {'type': 'REFINE', 'index': 0, 'property_num': None}
+>> REFINE merge: prev={'near_school': True, 'near_park': True, 'gated_community': True, 'purpose': 'living', 'bedrooms_floor': 3, 'types': ['apartment'], 'bedrooms': 3, 'max_price': '2.5 crore', 'locations': ['Clifton', 'DHA'], 'floor': 0, 'near_hospital': True}, new={}, merged={'near_school': True, 'near_park': True, 'gated_community': True, 'purpose': 'living', 'bedrooms_floor': 3, 'types': ['apartment'], 'bedrooms': 3, 'max_price': '2.5 crore', 'locations': ['Clifton', 'DHA'], 'floor': 0, 'near_hospital': True}
+>> Clifton: 6 candidates
+>> DHA: 6 candidates
+>> Price sort: target=250 lacs, candidates=10, prices=[527, 564, 590, 660, 664, 728, 782, 785, 786, 807]
+>> After sort top-5 prices: [527, 564, 590, 660, 664]
+>> Actions decided: {'follow_up': 'Want me to narrow these down by lift access and floor level, or keep it to the closest-to-Clifton/DHA areas?', 'actions': [{'id': 'different_area', 'label': '📍 Different Area'}, {'id': 'new_search', 'label': '🔄 New Search'}, {'id': 'contact', 'label': '📲 Agent Contact'}]}
+
+----------------------------------------------------------------------
+T6  C: Which of these has the best building and lift situation?
+   exp: Comparing the shortlist, this one has the best building management and lift/backup for you
+   BOT: I’m not stopping here — I’m keeping the 3-bed, your budget, and the Karachi side of the se
+   facts: {'stage': 'results', 'listings': 0, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [93mPARTIAL[0m — The bot keeps the search context and offers to compare building/lift condition, but it mainly redirects to expanding the area shortlist rather than directly answering which current option has the best building and lift situation.
+>> Quick check: 'PROPERTY'
+>> Classification: {'type': 'CHEAPER', 'index': 0, 'property_num': None}
+>> Actions decided: {'follow_up': 'Kya aap Gulshan-e-Hadeed mein 3-bedroom options dekhna chahte hain?', 'actions': [{'id': 'cheaper', 'label': '💸 Cheaper Options'}, {'id': 'larger', 'label': '🏠 Larger Properties'}, {'id': 'contact', 'label': '📲 Agent Contact'}]}
+
+----------------------------------------------------------------------
+T7  C: This seems a bit expensive
+   exp: I understand. The price reflects the area and building quality — I can pull cheaper option
+   BOT: I’m keeping the 3-bed, your budget, and the Karachi-side search on; I’ve only been easing 
+   facts: {'stage': 'results', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [92mMATCH[0m — Both acknowledge the concern that the option feels expensive and respond by proposing cheaper alternatives/trade-offs rather than arguing the price.
+>> Quick check: 'SMALLTALK'
+
+----------------------------------------------------------------------
+T8  C: My wife and I can visit Friday after school
+[90m   [skipped — out of scope: scheduling / physical visit][0m
+[90m   BOT: Great, Friday after school works well. What kind of property are you looking for?[0m
+
+======================================================================
+SUMMARY: [92m6 match[0m, [93m1 partial[0m, [91m0 mismatch[0m, 1 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 2. Unrealistic demand — expectation reset  (user_id=q_unreal_fa535c)
+======================================================================
+>> Property signal detected — bypassing small-talk gate
+
+----------------------------------------------------------------------
+T1  C: I want a 3 bed apartment in DHA under 1 crore
+   exp: Honestly, a 3-bed in DHA under 1 crore isn't realistic. We could raise the budget, drop to
+   BOT: Honestly, a 3-bed apartment in DHA at around 1 crore is extremely tight right now — in tha
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 110, 'over_budget_count': 0}
+   [92mMATCH[0m — Both replies set expectations that a 3-bed in DHA under the stated budget is unrealistic/tight and steer the customer toward either adjusting budget, compromising on features, or considering more affordable areas.
+
+----------------------------------------------------------------------
+T2  C: Okay what would you suggest instead?
+   exp: For a 3-bed near this budget, areas like Gulshan, Johar, or North Karachi are far more rea
+   BOT: DHA is a lovely choice, but I’ll be straight with you: at around 1 crore, a proper 3-bed a
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 110, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Both replies aim to guide the buyer toward more realistic alternatives for a 3-bed within budget, but the bot focuses on DHA-specific caveats and follow-up discovery instead of recommending similar value areas like Gulshan, Johar, or North Karachi.
+
+----------------------------------------------------------------------
+T3  C: Let's expand the area then
+   exp: Good. I'll focus on 3-bed family options in those practical areas within your budget.
+   BOT: Got it.
+
+Is this for your own living, or is it mainly an investment purchase?
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 110, 'over_budget_count': 0}
+   [91mMISMATCH[0m — The gold reply confirms a broadened area and narrows the search to practical 3-bed family options within budget, while the bot instead asks a different discovery question about owner-occupancy vs investment.
+
+======================================================================
+SUMMARY: [92m1 match[0m, [93m1 partial[0m, [91m1 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 3. Low-budget trade-off question  (user_id=q_lowbudget_78744f)
+======================================================================
+>> Property signal detected — bypassing small-talk gate
+
+----------------------------------------------------------------------
+T1  C: I need a good 3 bed flat but my budget is limited
+   exp: Understood. What budget should I keep in mind?
+   BOT: Got it.
+
+Is this for your own living, or mainly as an investment?
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [91mMISMATCH[0m — Gold asks for budget details, while the bot asks about intended use (own living vs investment), which is a different discovery question.
+
+----------------------------------------------------------------------
+T2  C: Around 1.1 crore
+   exp: At 1.1 crore a 3-bed is tight. Which compromise is okay: keep 3-bed but an older/weaker bu
+   BOT: Great — 1.1 crore is a workable budget for a proper 3-bed apartment in Karachi.
+
+In this r
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 121, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Both are discovery-focused and ask a preference question, but the gold asks the buyer to choose a budget compromise for a 3-bed, while the bot instead assumes 3-bed is workable and asks only about area preference.
+
+----------------------------------------------------------------------
+T3  C: I really want 3 bedrooms though
+   exp: Then I'll keep 3-bed strict and focus on older buildings or less prime blocks that fit 1.1
+   BOT: Great — 1.1 crore is a workable budget for a proper 3-bed apartment in Karachi.
+
+In this r
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 121, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Both acknowledge the 3-bedroom constraint and steer toward feasible Karachi areas within budget, but the bot shifts into broader area preference discovery instead of explicitly committing to strict 3-bed and lower-prime/older building focus.
+
+======================================================================
+SUMMARY: [92m0 match[0m, [93m2 partial[0m, [91m1 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 4. Investor — yield language, no ROI promise  (user_id=q_investor_f048ad)
+======================================================================
+
+----------------------------------------------------------------------
+T1  C: I want to buy something mainly for rental income
+   exp: Sure. What's your investment budget?
+   BOT: What's your investment budget? E.g. 1 crore, 50 lac, 2 crore 50 lac.
+   facts: {'stage': None, 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [92mMATCH[0m — Both replies ask for the user's investment budget, which is the same discovery information.
+>> Investment: budget=1 crore, bands=['HIGH'], listings=3
+
+----------------------------------------------------------------------
+T2  C: I have about 1 crore to invest
+   exp: For 1 crore aimed at rental income, here are area tiers by estimated yield — these are est
+   BOT: For 1 crore aimed at rental income, here's where it works hardest — these are area-level e
+   facts: {'stage': None, 'listings': 3, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [93mPARTIAL[0m — It matches the gold reply’s purpose of giving budget-based area/yield guidance with an estimate disclaimer, but it goes beyond and asks for listings rather than just presenting tiered rental-yield areas.
+
+----------------------------------------------------------------------
+T3  C: Which area gives the best return?
+   exp: The higher-yield tier gives the best monthly cash flow, with the trade-off of weaker resal
+   BOT: What's your investment budget? E.g. 1 crore, 50 lac, 2 crore 50 lac.
+   facts: {'stage': None, 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [91mMISMATCH[0m — Gold reply recommends the best-return area and explains the tradeoff, while the bot asks for budget instead of answering the question.
+
+======================================================================
+SUMMARY: [92m1 match[0m, [93m1 partial[0m, [91m1 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 5. Mortgage / affordability  (user_id=q_mortgage_23e3b2)
+======================================================================
+>> Property signal detected — bypassing small-talk gate
+
+----------------------------------------------------------------------
+T1  C: My monthly budget is around 2 lakh, what can I get?
+   exp: With ~2 lakh/month you can support a certain price range — here's roughly what that afford
+   BOT: With around 2 lakh a month, you’re usually looking at a decent 2-bed in some areas, or a s
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [92mMATCH[0m — The bot gives a budget-based housing fit and then asks a relevant discovery question about use case (own living vs investment), which aligns with the gold reply’s purpose of mapping the monthly budget to what it can afford.
+
+----------------------------------------------------------------------
+T2  C: What would the EMI be on a 2 crore property?
+   exp: For a 2 crore property, here's an approximate EMI based on a typical down payment, rate, a
+   BOT: On a 2 crore property, EMI depends mainly on the down payment, loan tenor, and interest ra
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 220, 'over_budget_count': 0}
+   [92mMATCH[0m — Both responses address the EMI estimate for a 2 crore property and provide a similar approximate financing result; the bot additionally transitions into discovery, which does not change the core purpose.
+
+======================================================================
+SUMMARY: [92m2 match[0m, [93m0 partial[0m, [91m0 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 6. Seller intent — flow switch  (user_id=q_seller_d0b309)
+======================================================================
+
+----------------------------------------------------------------------
+T1  C: I actually want to sell my flat
+   exp: Sure, I can help you list it. Where is it, and what's the size/bedrooms and condition?
+   BOT: Sure — I can help you get it listed and valued. Which area or block is your property in?
+   facts: {'stage': None, 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Bot correctly acknowledges a selling intent and asks for location, but it omits key discovery about size/bedrooms and condition, so it only partially matches the gold reply's purpose.
+
+----------------------------------------------------------------------
+T2  C: 2 bed in Gulshan, about 1200 sq ft, decent condition
+   exp: Noted. What price are you expecting? I'll help with valuation and connect you to list it.
+   BOT: Got it. How big is it — covered area or yards?
+   facts: {'stage': None, 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [91mMISMATCH[0m — Gold asks for expected price to proceed with valuation and listing, while the bot asks for area measurement details, so they seek different information and serve a different immediate purpose.
+
+======================================================================
+SUMMARY: [92m0 match[0m, [93m1 partial[0m, [91m1 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 7. Area confusion (Urdu)  (user_id=q_urdu_ebe7fd)
+======================================================================
+>> Quick check: 'PROPERTY'
+
+----------------------------------------------------------------------
+T1  C: Gulshan aur Johar mein se kya behtar hai family ke liye?
+   exp: Dono family ke liye theek hain — Gulshan zyada central hai, Johar mein budget mein zyada s
+   BOT: Family ke liye dono areas theek hain, lekin simple sa kehun to Gulshan zyada established h
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [92mMATCH[0m — Both replies give a family-oriented comparison of Gulshan vs Johar and then ask a follow-up discovery question to narrow the recommendation; the bot adds more detail but stays aligned with the same purpose.
+
+----------------------------------------------------------------------
+T2  C: Newer building zyada important hai
+   exp: Phir Johar ya Scheme 33 ki newer buildings behtar rahengi. Budget kya rakhun?
+   BOT: Samajh gaya.
+
+Ghar mein kitne log rahenge, aur bachay ya parents bhi saath honge?
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [91mMISMATCH[0m — Gold reply recommends newer buildings in relevant areas and asks budget, while the bot only asks about family size and occupants, so it serves a different discovery purpose.
+
+======================================================================
+SUMMARY: [92m1 match[0m, [93m0 partial[0m, [91m1 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 8. Just browsing — no listing dump  (user_id=q_browse_c08f16)
+======================================================================
+>> Property signal detected — bypassing small-talk gate
+
+----------------------------------------------------------------------
+T1  C: Show me some flats
+   exp: Happy to — to point you right, what's your budget, area, or how many bedrooms?
+   BOT: Got it.
+
+Is this for your own living, or for investment?
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': None, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Both are discovery questions, but the gold asks for practical search filters (budget/area/bedrooms) while the bot asks only about purpose (own use vs investment), so the intent overlaps only partially.
+
+======================================================================
+SUMMARY: [92m0 match[0m, [93m1 partial[0m, [91m0 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+======================================================================
+REPLAY: 9. Follow-up actions — cheaper / larger / refine  (user_id=q_followup_8a3cbb)
+======================================================================
+>> Property signal detected — bypassing small-talk gate
+
+----------------------------------------------------------------------
+T1  C: 3 bed apartment in Gulshan around 2.5 crore
+   exp: Here are 3-bed options in Gulshan within 2.5 crore.
+   BOT: Gulshan-e-Iqbal is a lovely area, but I should be straight with you: at around 2.5 crore, 
+   facts: {'stage': 'discovery', 'listings': 0, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [93mPARTIAL[0m — The bot is doing discovery and gives a relevant budget/area assessment for Gulshan, but it does not directly provide the same immediate result as the gold reply (a concise offer of 3-bed options within budget) and instead shifts into qualification questions.
+>> Discovery reveal with filters: {'locations': ['Gulshan-e-Iqbal'], 'types': ['apartment'], 'max_price': '2.5 crore', 'bedrooms': 3}
+>> Price sort: target=250 lacs, candidates=8, prices=[186, 210, 219, 226, 233, 244, 247]
+>> After sort top-5 prices: [247, 244, 233, 226, 226]
+>> New search saved as: 'Gulshan-e-Iqbal, apartment, 3 bed, under 2.5 crore'
+>> Actions decided: {'follow_up': 'Kya aap ko yeh properties Gulshan-e-Iqbal ke andar hi pasand aate hain, ya phir aapko yeh area bhi pasand aata hai?', 'actions': [{'id': 'cheaper', 'label': '💸 Cheaper Options'}, {'id': 'contact', 'label': '📲 Agent Contact'}, {'id': 'larger', 'label': '🏠 Larger Properties'}]}
+
+----------------------------------------------------------------------
+T2  C: Show me cheaper ones
+   exp: Here are more affordable 3-bed options in Gulshan below that price.
+   BOT: You’ve got 8 cheaper 3-beds on the board, running from 1.86 crore up to 2.47 crore, and th
+   facts: {'stage': 'results', 'listings': 8, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [92mMATCH[0m — Both replies provide cheaper options below the implied target, with the bot additionally summarizing the affordable listings and offering a way to narrow them further.
+>> Property signal detected — bypassing small-talk gate
+>> Classification: {'type': 'LARGER', 'index': 0, 'property_num': None}
+>> Price sort: target=250 lacs, candidates=2, prices=[853, 901]
+>> After sort top-5 prices: [853, 901]
+>> Actions decided: {'follow_up': 'Want me to show you properties in areas closer to Gulshan-e-Iqbal, or in other areas of Karachi?', 'actions': [{'id': 'different_area', 'label': '📍 Other Areas'}, {'id': 'cheaper', 'label': '💸 Cheaper Options'}, {'id': 'new_search', 'label': '🏠 Search Something Different'}]}
+
+----------------------------------------------------------------------
+T3  C: Actually, bigger ones instead
+   exp: Here are larger options with more space/rooms in Gulshan.
+   BOT: I’m not stopping here — I’m keeping your 4-bed requirement, the around 2.5 crore budget, a
+   facts: {'stage': 'results', 'listings': 0, 'budget_ceiling_lacs': 275, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Both respond to the request for bigger options, but the bot shifts away from larger Gulshan-only options and proposes smaller/nearby alternatives instead of directly recommending bigger homes in Gulshan.
+>> Property signal detected — bypassing small-talk gate
+>> Classification: {'type': 'REFINE', 'index': 1, 'property_num': None}
+>> REFINE merge: prev={'locations': ['Gulshan-e-Iqbal'], 'types': ['apartment'], 'max_price': '2.5 crore', 'bedrooms': 4}, new={'locations': [], 'types': [], 'bedrooms': 2, 'min_bathrooms': 0, 'max_price': 'same budget', 'features': []}, merged={'locations': [], 'types': [], 'max_price': 'same budget', 'bedrooms': 2, 'min_bathrooms': 0, 'features': []}
+>> Price sort: target=0 lacs, candidates=100, prices=[86, 96, 107, 108, 114, 119, 126, 128, 135, 137]
+>> Actions decided: {'follow_up': 'Kya aap area ya neighbourhood par focus karna chahte hain?', 'actions': [{'id': 'larger', 'label': '🏠 Bada Hua'}, {'id': 'contact', 'label': '📲 Agent Se Contact'}, {'id': 'cheaper', 'label': '💸 Kam Budget'}]}
+
+----------------------------------------------------------------------
+T4  C: 2 bed would be better, within the same budget
+   exp: Switching to 2-bed in Gulshan within the same 2.5 crore budget — here they are.
+   BOT: Yep, that opens things up nicely: there are 10 two-bed options on the board, from 1.28 cro
+   facts: {'stage': 'results', 'listings': 10, 'budget_ceiling_lacs': 0, 'over_budget_count': 0}
+   [93mPARTIAL[0m — Both replies present filtered 2-bed search results and continue the property search, but the bot’s result set is for different areas and includes extra guidance rather than specifically matching the gold reply’s 2-bed within-budget Gulshan recommendation.
+
+======================================================================
+SUMMARY: [92m1 match[0m, [93m3 partial[0m, [91m0 mismatch[0m, 0 skipped (out of scope)
+======================================================================
+
+
+######################################################################
+BATCH SCOREBOARD
+######################################################################
+  1. Full journey — family buyer, accessibility, o  [92m6M[0m [93m1P[0m [91m0X[0m  (/7 graded)
+  2. Unrealistic demand — expectation reset         [92m1M[0m [93m1P[0m [91m1X[0m  (/3 graded)
+  3. Low-budget trade-off question                  [92m0M[0m [93m2P[0m [91m1X[0m  (/3 graded)
+  4. Investor — yield language, no ROI promise      [92m1M[0m [93m1P[0m [91m1X[0m  (/3 graded)
+  5. Mortgage / affordability                       [92m2M[0m [93m0P[0m [91m0X[0m  (/2 graded)
+  6. Seller intent — flow switch                    [92m0M[0m [93m1P[0m [91m1X[0m  (/2 graded)
+  7. Area confusion (Urdu)                          [92m1M[0m [93m0P[0m [91m1X[0m  (/2 graded)
+  8. Just browsing — no listing dump                [92m0M[0m [93m1P[0m [91m0X[0m  (/1 graded)
+  9. Follow-up actions — cheaper / larger / refine  [92m1M[0m [93m3P[0m [91m0X[0m  (/4 graded)
+
+  TOTAL: [92m12 match[0m, [93m10 partial[0m, [91m5 mismatch[0m out of 27 graded turns; 1 skipped.

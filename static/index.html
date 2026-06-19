@@ -2231,6 +2231,18 @@
         return;
       }
 
+      // No matching properties — never present an empty grid as a finished search.
+      // Keep the buyer in the conversation (the agent is asking for the smallest next
+      // compromise) and leave any previously shown grid untouched instead of flipping
+      // into an empty results panel.
+      if (data.meta && data.meta.no_results) {
+        updateResults(allListings);
+        isLoading = false;
+        document.getElementById('sendBtn').disabled = false;
+        input.focus();
+        return;
+      }
+
       // Reveal (or any post-discovery turn): animate into the split view.
       setMode('results');
       hideDiscoveryCounter();

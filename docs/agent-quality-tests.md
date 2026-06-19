@@ -107,15 +107,26 @@ I need a good 3 bed flat but my budget is limited.
 
 Expected behavior:
 
-* Ask exact budget.
-* Set expectations politely.
-* Explain trade-offs: area, size, age of building, amenities.
-* Do not make the customer feel poor.
+* Ask exact budget if not already provided.
+* Set expectations politely without making the customer feel poor.
+* Explain the main trade-offs: area, size, building age, location quality, amenities, and distance from central areas.
+* If budget is tight for the desired area/property type, do not jump directly to secondary filters like floor, lift, drawing room, or west-open.
+* First ask which compromise is acceptable:
+
+  * keep 3-bed strict but accept older/weaker building or less prime block
+  * consider a better 2-bed in a stronger building/location
+  * expand to slightly farther areas
+  * increase budget if possible
+* Do not say nothing is possible unless inventory/data clearly supports that.
+* Do not overpromise premium-area options within a tight budget.
 
 Pass criteria:
 
 * Helpful and respectful.
 * Does not overpromise.
+* Identifies the budget-vs-location-vs-size mismatch.
+* Asks a trade-off question before asking secondary preference questions.
+
 
 ## 7. Unrealistic demand
 

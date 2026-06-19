@@ -627,6 +627,18 @@ def search_properties(query: str, filters: dict, k: int = 10) -> list:
                 results = filtered
 
         results = _rerank_by_amenities(results, filters)
+
+    # Re-enforce HARD constraints the unfiltered fallback above may have dropped.
+    # When a filtered search returns nothing we re-query WITHOUT the Chroma filter
+    # for recall — but property TYPE and possession are non-negotiable: a buyer who
+    # asked for an apartment must NEVER be shown a house. Better to return empty here
+    # and let the no-results / fallback path explain the gap honestly and ask.
+    _hard_types = [t.lower() for t in (filters.get("types") or []) if isinstance(t, str)]
+    if _hard_types:
+        results = [(d, s) for d, s in results if (d.metadata.get("type") or "").lower() in _hard_types]
+    if filters.get("possession"):
+        results = [(d, s) for d, s in results if d.metadata.get("possession") == filters["possession"]]
+
     if not filters.get("locations"):
         def _parent_area(location: str) -> str:
             area = location.split(",")[0].strip()
@@ -1509,6 +1521,34 @@ def _parse_bed_requirement(query: str):
     return (None, None)
 
 
+# Bedroom strictness — the buyer pinning the count as non-negotiable. When set we never
+# auto-relax bedrooms (no 3→2 in the widen ladder or the no-results levers); a smaller
+# size is only ever offered as an explicit opt-in the buyer must accept.
+_BED_STRICT_RE = re.compile(
+    r'(strict|non[-\s]?negotiable|mandatory|must[-\s]have|must\s+(?:be|stay)|a\s+must|'
+    r'has\s+to\s+be|need\s+(?:it\s+)?to\s+be|no\s+compromise|can(?:no|\'?)t\s+compromise|'
+    r'insist\w*|firm\s+on|fixed\s+on|definitely)', re.IGNORECASE)
+# Explicit openness to fewer bedrooms — clears a previously-set strict flag.
+_BED_OPEN_RE = re.compile(
+    r'(open\s+to|okay?\s+with|fine\s+with|can\s+(?:also\s+)?consider|happy\s+to\s+consider|'
+    r'flexible\s+(?:on|about)|chalega|chal\s+jayega)', re.IGNORECASE)
+_BED_CTX = ("bed", "bedroom", "bhk", "room")
+
+def _bedrooms_strict_signal(query: str):
+    """True → mark bedrooms strict; False → buyer is open to fewer (clear strict);
+    None → no signal this turn (leave the flag unchanged). Only fires when the message
+    is actually about bedrooms, so 'strict budget' never locks the bedroom count."""
+    q = " " + (query or "").lower() + " "
+    bed_ctx = any(w in q for w in _BED_CTX)
+    if not bed_ctx:
+        return None
+    if _BED_OPEN_RE.search(q):
+        return False
+    if _BED_STRICT_RE.search(q):
+        return True
+    return None
+
+
 def _count_where(filters: dict):
     """Build a metadata-only where clause for an EXACT match count. Unlike
     build_chroma_filter this DOES include price + situational fields, because
@@ -1656,6 +1696,11 @@ def _merge_discovery_filters(state: dict, user_query: str, lang: str = "English"
             explicit["bedrooms_min"] = bed_n
         else:
             explicit["bedrooms"] = bed_n
+    # Bedroom strictness persists across turns once set; an explicit "open to fewer"
+    # clears it. Added after the comprehension so the bool is never filtered out.
+    _bed_strict = _bedrooms_strict_signal(user_query)
+    if _bed_strict is not None:
+        explicit["bedrooms_strict"] = _bed_strict
     inferred = {}
     inferred.update(infer_situational_filters(user_query))
     inferred.update(infer_floor_pref(user_query))
@@ -2166,6 +2211,62 @@ In about 2 natural sentences: honestly but warmly tell them this budget is very 
     return llm.invoke([HumanMessage(content=prompt)]).content.strip()
 
 
+def _budget_tradeoff_message(state: dict, history_text: str, lang: str = "English") -> str:
+    """When the buyer has fixed a size + area(s) + budget but that EXACT combination is
+    genuinely tight in our inventory, surface the core COMPROMISE before any secondary
+    preference (floor, lift, drawing room, west-open). The human-agent move: name the
+    real trade-off and let the buyer choose — keep the size strict and accept an
+    older/weaker building or less-prime block, step to a stronger smaller unit, hold the
+    area or widen it a little, or stretch the budget. Returns "" when the budget is
+    comfortable for the size (>=3 real matches) so we never manufacture a problem or make
+    the buyer feel they can't afford a home. Distinct from _budget_reality_message (which
+    only fires for premium-ONLY fantasy areas) and _area_intel_message (single area);
+    this covers the value-area, tight-for-size gap those two skip. LLM wording, with a
+    deterministic fallback. Only ever offers a lever our actual stock supports."""
+    f = state["filters"]
+    locs = [l for l in (f.get("locations") or []) if isinstance(l, str)]
+    beds = f.get("bedrooms")
+    if not locs or not f.get("max_price") or not beds:
+        return ""
+    strict = count_matches(f)
+    if strict >= 3:
+        return ""  # comfortably feasible — leave the stable flow alone
+    # Which compromises the inventory ACTUALLY supports — never offer a dead lever.
+    smaller_ok = beds > 1 and count_matches({**f, "bedrooms": beds - 1}) > strict
+    wider_areas = _areas_for_budget({k: v for k, v in f.items() if k != "locations"}, limit=4)
+    levers = [f"keep {beds}-bed strict but accept an older building, smaller size, or a less-prime block"]
+    if smaller_ok:
+        levers.append(f"consider a better-quality {beds - 1}-bed in a stronger building or location")
+    if wider_areas:
+        levers.append("widen the area a little to nearby value pockets")
+    levers.append("stretch the budget slightly")
+    desc = _size_phrase(f)
+    budget = f.get("max_price")
+    areas_disp = ", ".join(locs[:4])
+    prompt = f"""You are a candid, warm Karachi real-estate advisor mid-consultation, before showing any listings — talk like an experienced human agent, never a bot or a form. The buyer wants a {desc} at around {budget} in {areas_disp}. At this budget that exact combination is genuinely tight in our inventory: a proper {beds}-bed there usually means real compromises.
+
+In 2-3 short, consultative sentences (NO markdown, NO bullet lists):
+1. Warmly and honestly acknowledge the budget is tight for that size in those areas — but NEVER imply they can't afford a home, and NEVER claim nothing at all is possible.
+2. Briefly explain the core trade-off in plain language (e.g. a proper {beds}-bed here may mean an older building, smaller size, or a less-prime block).
+3. End by asking which compromise they'd prefer, framed as a clear either/or choice and drawn ONLY from these real levers: {'; '.join(levers)}.
+Do NOT ask about floor, lift, drawing room, west-open, or any other secondary preference yet. Reply ONLY in {lang}."""
+    try:
+        return llm.invoke([HumanMessage(content=prompt)]).content.strip()
+    except Exception as e:
+        print(f">> _budget_tradeoff_message LLM failed: {e}")
+        if lang == "Urdu":
+            choice = (f"{beds}-bed strict rakhun (thori purani building ya kam-prime block ke sath)"
+                      + (f", ya behtar {beds - 1}-bed dikhaun" if smaller_ok else ""))
+            tail = " Ya thora area widen kar dun behtar setup ke liye." if wider_areas else ""
+            return (f"{budget} mein {areas_disp} ke ander proper {desc} milna tight hai — aksar building "
+                    f"ki age, size ya block par compromise karna parta hai.{tail}\n\nMain {choice}?")
+        choice = (f"keep the {beds}-bed strict (accepting an older building or less-prime block)"
+                  + (f", or look at a stronger {beds - 1}-bed instead" if smaller_ok else ""))
+        tail = " I can also widen the area slightly if you'd prefer a better family setup." if wider_areas else ""
+        return (f"At around {budget}, a proper {desc} in {areas_disp} is tight — usually it means some "
+                f"compromise on building age, size, or block.{tail}\n\nWould you like me to {choice}?")
+
+
 def _widen_discovery_search(filters: dict, search_query: str, target: int = 5):
     """A real agent shortlists ~5 options and NEVER hands back an empty screen.
     Our hard filters (floor/lift/possession + exact bedrooms + a tight budget in a
@@ -2200,7 +2301,9 @@ def _widen_discovery_search(filters: dict, search_query: str, target: int = 5):
             ml, ctx = _run(cur)
 
     # 2) Exact bedrooms → ±1 (a 3-bed for a wanted-4 is the easiest substitute).
-    if len(ml) < target and cur.get("bedrooms"):
+    #    SKIPPED when the buyer pinned bedrooms as strict — we never silently drop to a
+    #    smaller (or larger) count; the no-results path offers that only as an opt-in.
+    if len(ml) < target and cur.get("bedrooms") and not cur.get("bedrooms_strict"):
         want = cur["bedrooms"]
         trial = {k: v for k, v in cur.items() if k != "bedrooms"}
         trial["bedrooms_min"] = max(1, want - 1)
@@ -2232,17 +2335,98 @@ def _widen_discovery_search(filters: dict, search_query: str, target: int = 5):
                 if int(l["metadata"].get("price_numeric") or 0) > orig_lacs:
                     l.setdefault("relaxed", []).append("budget")
 
-    # 4) Specific area — last resort, only if the area genuinely has nothing.
-    if len(ml) == 0 and cur.get("locations"):
+    # 4) Specific area — the biggest compromise, so still a near-last resort: fire
+    #    only when the preferred area can't fill even a small shortlist (<3). We then
+    #    look JUST BEYOND it to surface the closest family-livable options, and tag
+    #    ONLY the genuinely out-of-area listings so the reveal copy stays honest about
+    #    which ones are the compromise (in-area matches keep their clean status).
+    if len(ml) < 3 and cur.get("locations"):
+        orig_locs = [l.lower() for l in cur.get("locations") if isinstance(l, str)]
         trial = {k: v for k, v in cur.items() if k != "locations"}
         ml4, ctx4 = _run(trial)
-        if ml4:
+        if len(ml4) > len(ml):
             cur, ml, ctx = trial, ml4, ctx4
             relaxed.append("area")
             for l in ml:
-                l.setdefault("relaxed", []).append("area")
+                loc = (l["metadata"].get("location") or "").lower()
+                if not any(o in loc for o in orig_locs):
+                    l.setdefault("relaxed", []).append("area")
 
     return ml, ctx, relaxed
+
+
+def _partition_hard_compromise(listings: list, filters: dict) -> tuple:
+    """Split a shortlist into (clean, fallback). A 'fallback' listing breaks a HARD
+    requirement the buyer never agreed to relax — a different property TYPE than asked
+    for, or a price clearly OVER the stated budget. These must NEVER be presented as
+    normal matches; the caller surfaces them transparently as labelled fallback options
+    and asks the buyer first. Soft easements (floor, lift, bedrooms ±1 when not strict,
+    looking just beyond the area) are NOT hard compromises and stay in 'clean'."""
+    want_types = [t.lower() for t in (filters.get("types") or []) if isinstance(t, str)]
+    ceil = price_to_lacs(str(filters["max_price"])) if filters.get("max_price") else 0
+    over_cap = int(ceil * 1.1) if ceil > 0 else 0  # honour the "around X" grace
+    clean, fallback = [], []
+    for l in listings:
+        meta = l.get("metadata", {})
+        breaks = []
+        if want_types and (meta.get("type") or "").lower() not in want_types:
+            breaks.append("type")
+        if over_cap and int(meta.get("price_numeric") or 0) > over_cap:
+            breaks.append("budget")
+        if breaks:
+            l["compromise"] = breaks
+            fallback.append(l)
+        else:
+            clean.append(l)
+    return clean, fallback
+
+
+def _fallback_offer_block(fallback: list, filters: dict) -> str:
+    """One honest, fact-grounded brief describing the closest fallback options, the
+    EXACT compromises they carry, and the instruction to ASK the buyer before showing
+    them. Used when the only nearby stock breaks a hard requirement (wrong type or
+    over budget) — so the agent never passes a compromise off as a clean match."""
+    if not fallback:
+        return ""
+    want_types = [t.lower() for t in (filters.get("types") or []) if isinstance(t, str)]
+    asked_type = "/".join(want_types) if want_types else None
+    ceil = price_to_lacs(str(filters["max_price"])) if filters.get("max_price") else 0
+
+    types_seen = sorted({(l["metadata"].get("type") or "").strip()
+                         for l in fallback if l["metadata"].get("type")})
+    prices = sorted(int(l["metadata"].get("price_numeric") or 0)
+                    for l in fallback if l["metadata"].get("price_numeric"))
+    areas = sorted({(l["metadata"].get("location") or "").split(",")[0].strip()
+                    for l in fallback if l["metadata"].get("location")})
+    compromises = sorted({c for l in fallback for c in l.get("compromise", [])})
+
+    desc_parts = []
+    if types_seen:
+        desc_parts.append(f"they are {', '.join(types_seen)}")
+    if prices:
+        rng = lacs_to_price(prices[0]) + (f" to {lacs_to_price(prices[-1])}" if prices[-1] != prices[0] else "")
+        desc_parts.append(f"priced {rng}")
+    if areas:
+        desc_parts.append(f"in {', '.join(areas[:3])}")
+    desc = "; ".join(desc_parts)
+
+    comp_words = []
+    if "type" in compromises and asked_type:
+        comp_words.append(f"they are {', '.join(types_seen) or 'a different type'}, not {asked_type}")
+    if "budget" in compromises and ceil:
+        comp_words.append(f"they are above your {lacs_to_price(ceil)} budget")
+    comp_clause = " and ".join(comp_words) if comp_words else "they don't match every requirement"
+
+    return (
+        f"CLOSEST FALLBACK OPTIONS (do NOT present these as clean matches, and they are NOT shown as cards yet): {desc}. "
+        f"These carry real compromises: {comp_clause}. "
+        "You MUST: (1) keep the buyer's hard requirements (bedrooms, budget, property type, broad area) intact in your framing; "
+        "(2) state plainly that within their stated budget and property type there is no clean match in the requested areas right now; "
+        "(3) describe these strictly as fallback / closest alternatives and name the exact compromise(s) above — never imply they fit the budget or match the type; "
+        "(4) do NOT push any single one and do NOT overclaim 'family-friendly', 'well-maintained' or similar unless stated in the data; "
+        "(5) END by asking whether to show these as fallback options or keep searching with the original requirements — you may also offer the smallest realistic move (a slightly higher budget, a wider area, or a strong 2-bed only if they're open). "
+        "Keep it warm and brief: 3-5 short sentences, no markdown, no bullet lists."
+    )
 
 
 # Plain, polite, fixed phrasing for each slot question. We use these verbatim when
@@ -2656,6 +2840,28 @@ def _discovery_step(user_id: str, user_query: str, history_text: str, start_ok: 
             return {"mode": "ask", "question": intel, "count": count, "dim": "area_intel",
                     "filters": dict(state["filters"]), "dropped": dropped}
 
+    # Budget trade-off (once): the buyer has fixed a size + area(s) + budget, but that
+    # exact combination is genuinely tight in our stock. Before asking secondary prefs
+    # (floor/lift/extras), surface the core compromise and let them choose. Skips the
+    # premium-only fantasy case (_budget_reality_message already pushed back → pushed_back)
+    # and the committed-single-area case (_area_intel_message already gave honest fit
+    # guidance → area_discussed); this fills the value-area, tight-for-size gap between
+    # them. _budget_tradeoff_message returns "" when the budget is actually comfortable.
+    if (not state.get("tradeoff_discussed") and not state.get("pushed_back")
+            and not state.get("area_discussed") and not wants_results
+            and state["filters"].get("max_price") and state["filters"].get("bedrooms")
+            and [l for l in (state["filters"].get("locations") or []) if isinstance(l, str)]):
+        tradeoff = _budget_tradeoff_message(state, history_text, lang)
+        if tradeoff:
+            state["tradeoff_discussed"] = True
+            # The buyer's answer next turn resolves the size/area compromise; don't then
+            # fire the bare floor question — mark it resolved so we head toward the reveal.
+            state.setdefault("resolved", set()).add("floor")
+            state["last_dim"] = "tradeoff"
+            state["turns"] += 1
+            return {"mode": "ask", "question": tradeoff, "count": count, "dim": "tradeoff",
+                    "filters": dict(state["filters"]), "dropped": dropped}
+
     dim = None if (wants_results or _discovery_ready(state)) else _next_discovery_dim(state)
     if dim is None:
         state["active"] = False
@@ -2816,6 +3022,73 @@ def _seller_step(user_id: str, user_query: str, lang: str, is_start: bool):
     return _seller_resp(q, "seller")
 
 
+def _gap_compromise_block(filters: dict) -> str:
+    """When a reveal finds nothing even after relaxing the soft/optional preferences,
+    work out — from REAL stock — which smallest compromise opens options, so the reply
+    can suggest a concrete next step instead of a blunt dead-end.
+
+    Bedrooms are the protected dimension here: when the buyer pinned them strict we KEEP
+    the count in every lever (only nearby areas / budget move), and a smaller size is
+    surfaced ONLY as an explicit opt-in the buyer must agree to — never auto-applied. A
+    budget increase is always listed LAST, never the lead. Returns "" when nothing is
+    computable, so the copy degrades to a plain, polite ask."""
+    beds = filters.get("bedrooms") or filters.get("bedrooms_min")
+    keep_beds = bool(filters.get("bedrooms_strict"))
+    levers = []
+
+    # Same size + same budget, just beyond the preferred area (keeps every hard filter).
+    if filters.get("locations"):
+        alt = [a for a in _areas_for_budget({k: v for k, v in filters.items() if k != "locations"})
+               if a.lower() not in " ".join(filters["locations"]).lower()]
+        if alt:
+            size = f"{beds}-bed " if beds else ""
+            levers.append(f"the same {size}brief at the same budget has options in nearby value areas like {', '.join(alt[:3])}")
+
+    # One bedroom fewer — ONLY when the buyer did NOT pin bedrooms. Same area first,
+    # else a smaller size in nearby value areas. Skipped entirely when keep_beds.
+    if not keep_beds and beds and beds > 1:
+        trial = {k: v for k, v in filters.items() if k not in ("bedrooms", "bedrooms_min")}
+        trial["bedrooms"] = beds - 1
+        if count_matches(trial) > 0:
+            levers.append(f"a {beds - 1}-bed (instead of {beds}-bed), keeping the same area and budget, does have options")
+        else:
+            alt2 = _areas_for_budget({k: v for k, v in filters.items()
+                                      if k not in ("locations", "bedrooms", "bedrooms_min")} | {"bedrooms": beds - 1})
+            if alt2:
+                levers.append(f"a {beds - 1}-bed in nearby value areas like {', '.join(alt2[:3])} at the same budget")
+
+    # Modest budget stretch — same area, same beds. LAST, never the lead.
+    if filters.get("max_price"):
+        cur = price_to_lacs(str(filters["max_price"]))
+        if cur > 0 and count_matches({**filters, "max_price": lacs_to_price(int(cur * 1.25))}) > 0:
+            levers.append(f"stretching the budget a little (around {lacs_to_price(int(cur * 1.25))}) opens up the requested area at the same size")
+
+    # When bedrooms are pinned and nothing above fits, a smaller home is offered ONLY as
+    # an explicit opt-in question — the agent must never switch to it on its own.
+    optin = ""
+    if keep_beds and beds and beds > 1:
+        smaller_same = {k: v for k, v in filters.items() if k not in ("bedrooms", "bedrooms_min")}
+        smaller_same["bedrooms"] = beds - 1
+        smaller_alt = _areas_for_budget({k: v for k, v in filters.items()
+                                         if k not in ("locations", "bedrooms", "bedrooms_min")} | {"bedrooms": beds - 1})
+        if count_matches(smaller_same) > 0 or smaller_alt:
+            optin = (f"ONLY IF the buyer explicitly agrees to drop a bedroom, a {beds - 1}-bed opens up more "
+                     f"options — offer this strictly as a question, and NEVER switch to it on your own.")
+
+    if not levers and not optin:
+        return ""
+    out = []
+    if keep_beds:
+        out.append(f"The buyer pinned {beds} bedrooms as STRICT — keep {beds} bedrooms as a hard filter and DO "
+                   f"NOT propose or switch to fewer bedrooms unless they explicitly agree.")
+    if levers:
+        out.append("Compromise paths that keep their hard filters and genuinely DO have stock, in priority order "
+                   "(suggest the FIRST that fits; never lead with the budget one):\n- " + "\n- ".join(levers))
+    if optin:
+        out.append(optin)
+    return "\n".join(out)
+
+
 def get_response(user_query: str, user_id: str = "web", channel: str = "web") -> dict:
     memory = get_user_memory(user_id)
     search_history = get_user_search_history(user_id)
@@ -2854,6 +3127,7 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
     discovery_filters = None
     discovery_search_query = None
     discovery_dropped = []
+    fallback_offer = []
 
     # ── Progressive discovery (CONTINUE an active session) ──
     # Runs before the intent/small-talk checks so answers to our own discovery
@@ -3208,6 +3482,23 @@ def get_response(user_query: str, user_id: str = "web", channel: str = "web") ->
                 if widened:
                     discovery_dropped = list(discovery_dropped) + widened
 
+            # Honesty guard: never let a different property TYPE or clearly over-budget
+            # stock pose as a normal match. Pull those out as labelled fallback the copy
+            # must ask about; the grid keeps only clean matches. If nothing clean
+            # remains, the grid is suppressed and the reply leads with the fallback ask.
+            if discovery_filters is not None and matched_listings:
+                _clean, fallback_offer = _partition_hard_compromise(matched_listings, filters)
+                if fallback_offer:
+                    matched_listings = _clean
+                    # Rebuild context from the clean set only, so neither this reply nor
+                    # a later follow-up can describe a fallback as if it were a match.
+                    context = "".join(
+                        f"\n---\n{l['metadata'].get('description', '')}\n"
+                        for l in _clean[:GRID_VISIBLE_COUNT]
+                    )
+                    # the soft "budget" easement note is replaced by the explicit ask
+                    discovery_dropped = [d for d in discovery_dropped if d != "budget"]
+
             topic_parts = []
             if filters.get("locations"):
                 topic_parts.append(" / ".join(filters["locations"]))
@@ -3274,13 +3565,15 @@ Write a warm, advisory overview in 2-3 short sentences:
 - Then give a small, honest POINT OF VIEW — a gentle recommendation with the reasoning, grounded in what the user has and hasn't told you (e.g. "rather than the cheapest 1-bed, the 2-bed is worth a look first for real family space within the same budget"). When you name a property, write its title EXACTLY as it appears in the overview, never an ID number.{_wa_missing}
 Do NOT end with a question — a follow-up with tappable options is sent separately right after. If more than 5 results were found, mention the top 5 are shown below. Friendly tone, at most one emoji. Only use facts from the "Results overview" below. Match the user's language (Urdu or English)."""
     elif no_results:
-        system_prompt = """You are a helpful real estate assistant. No properties were found.
+        system_prompt = """You are a warm, candid Karachi real estate advisor. The exact brief — every preference at once — has no perfect match right now, but you do NOT stop the search or dismiss the buyer.
 Rules:
-- ONE sentence saying nothing matched — friendly, not apologetic
-- ONE sentence suggesting a specific alternative (different area, higher budget, or different type)
-- Never say "I'm sorry", "I apologize", or anything formal
-- Speak like a helpful friend
-- Match the user's language (Urdu or English)"""
+- NEVER use blunt or formal wording: no "kuch bhi match nahi hua", "nothing matched", "no results", "no properties found", "I'm sorry", "I apologize", or "database".
+- Open by reassuring them you won't stop here. Make clear you're KEEPING the core requirements (bedrooms, budget, and the broad preferred area) and that you've eased only the optional, softer preferences where it helps (parking, generator, drawing room, west-open, prime block, newer building, lift). Subjective wants like family-friendly / well-maintained / livable / not-congested are treated as guidance for ranking, not strict filters.
+- Then suggest the SMALLEST next compromise that actually opens up options, using ONLY the concrete paths provided below. Suggest a budget increase LAST, and only if it is the sole remaining lever — never lead with it.
+- If the buyer pinned the bedroom count as strict (the context below will say so), KEEP that bedroom count and do NOT propose or switch to fewer bedrooms on your own. You may mention a smaller size only as an explicit question ("if you're open to it"), never as a decision you've already made.
+- Frame it as a question that hands the choice back to the buyer (e.g. slightly wider nearby areas, a small budget stretch, or — only if they're open — a smaller size).
+- Keep it natural and brief: 2-4 short sentences. No markdown, no bullet lists, no headings.
+- Match the user's language (Urdu or English)."""
     elif is_overview:
         if is_opening:
             length_guidance = """This is the user's FIRST search — keep it SHORT, ~55-70 words total, easy to skim. Write ONE compact 2-sentence body, then the closing question on its own line. Sentence 1: how many options + the price band + a SHORT area characterization (name at most 2-3 areas, or just say "budget-friendly areas" — do NOT list every neighbourhood). Sentence 2: ONE recommendation with a brief why — no second pick, no amenity list. Then the question. If in doubt, cut."""
@@ -3325,16 +3618,24 @@ User's query (treat this as already-known context — do NOT repeat it back): "{
     # On a zero-result discovery reveal, find where the requested type/beds/budget
     # DOES exist so we can suggest concrete alternative areas instead of a dead-end.
     alt_block = ""
-    if no_results and filters.get("locations"):
+    if no_results and not fallback_offer and filters.get("locations"):
         alt = [a for a in _areas_for_budget({k: v for k, v in filters.items() if k != "locations"})
                if a.lower() not in " ".join(filters["locations"]).lower()]
         if alt:
             beds = filters.get("bedrooms")
             what = f"{beds}-bed " if beds else ""
             what += "/".join(filters.get("types") or [""])
-            alt_block = (f"Nothing matched in {', '.join(filters['locations'])}, but {what} options in budget "
-                         f"DO exist in: {', '.join(alt[:4])}. Suggest one or two of these concretely, and offer "
-                         "to broaden the area or adjust bedrooms.")
+            alt_block = (f"{what} options in budget DO exist in nearby areas: {', '.join(alt[:4])}. "
+                         "You may suggest one or two of these concretely.")
+
+    # Labelled fallback options (wrong type / over budget) — surfaced honestly and only
+    # offered, never shown as clean matches. When present it OWNS the compromise framing,
+    # so skip the generic gap/alt blocks to avoid conflicting "next step" instructions.
+    fallback_block = _fallback_offer_block(fallback_offer, filters) if fallback_offer else ""
+
+    # Smallest-compromise levers, grounded in real stock — so a true dead-end becomes a
+    # concrete "here's the smallest next step" instead of a blunt failure (budget last).
+    gap_block = _gap_compromise_block(filters) if (no_results and not fallback_block) else ""
 
     if no_results:
         results_block = "No matching properties found."
@@ -3373,7 +3674,9 @@ User query: {user_query}
 {relax_note}
 {advisory_block}
 {alt_block}
-{"Tell the user nothing matched and suggest what to try." if no_results else "Answer naturally based on the information above."}"""
+{gap_block}
+{fallback_block}
+{("Follow the CLOSEST FALLBACK OPTIONS instructions above exactly: be transparent about the compromise and end by asking whether to show the fallback or keep searching the original brief." if fallback_block else ("Reassure the buyer you are continuing the search, keep their core requirements (bedrooms, budget, broad area), and suggest the smallest concrete next compromise from the paths above — never lead with a budget increase." if no_results else "Answer naturally based on the information above."))}"""
 
     response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
     ai_response = response.content
@@ -3413,7 +3716,7 @@ User query: {user_query}
             "no_results": no_results,
             "action": action_label,
             "top_pick_id": matched_listings[0]["metadata"]["id"] if matched_listings else None,
-            "new_results": classification_type in ("NEWSEARCH", "CHEAPER", "LARGER"),
+            "new_results": (classification_type in ("NEWSEARCH", "CHEAPER", "LARGER")) and not no_results,
             "highlight_id": highlight_id,
             "discovery_dropped": discovery_dropped,
         }
